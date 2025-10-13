@@ -18,6 +18,7 @@ openai
 anthropic
 google-genai
 googletrans
+inspect-ai
 
 evaluate
 datasets

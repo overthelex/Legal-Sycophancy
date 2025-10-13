@@ -8,4 +8,6 @@ __pycache__
 other
 results
 figures
+figures_new
+data/experiments
 logs
