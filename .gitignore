@@ -4,10 +4,32 @@
 .venv
 __pycache__
 
-
+# Output directories
 other
 results
 figures
 figures_new
 data/experiments
 logs
+slurm/output
+
+# Large data files
+data/real_cases/echr_new/evaluations/*.csv
+*.csv
+!config/*.csv
+!data/real_cases/echr_new/unanimous/*.json
+
+# HuggingFace cache
+hf_cache/
+.cache/
+
+# Python cache
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build

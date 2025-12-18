@@ -2,6 +2,7 @@
 """
 Unified Experiment Runner
 Runs multiple scenarios defined in config file with efficient batching.
+Supports both OpenAI API and vLLM with Ray Data batch inference.
 """
 
 import asyncio
@@ -11,12 +12,20 @@ import logging
 import pandas as pd
 import re
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import openai
 from dotenv import load_dotenv
 import os
 
 from src.real_cases.config import DEFAULT_JUDGE_MODEL
+
+# Optional imports for vLLM/Ray Data
+try:
+    import ray
+    from ray.data.llm import build_llm_processor, vLLMEngineProcessorConfig
+    RAY_AVAILABLE = True
+except ImportError:
+    RAY_AVAILABLE = False
 
 # Load environment variables
 load_dotenv()
@@ -153,6 +162,108 @@ def extract_rating_from_response(response_text: str) -> int:
     return 3
 
 
+def get_model_output_dir(base_dir: str, model_id: str) -> Path:
+    """Get model-specific output directory."""
+    # Extract model name from ID (e.g., "openai/gpt-4o" -> "gpt-4o", "meta-llama/Llama-3.1-8B-Instruct" -> "llama-3.1-8b")
+    if '/' in model_id:
+        model_name = model_id.split('/')[-1].lower()
+    else:
+        model_name = model_id.lower()
+
+    # Create model-specific subdirectory
+    model_dir = Path(base_dir) / model_name
+    model_dir.mkdir(parents=True, exist_ok=True)
+    return model_dir
+
+
+def evaluate_cases_vllm_batch(cases: List[Dict], model_id: str, temperature: float = 0.0) -> List[int]:
+    """Evaluate all cases using vLLM with Ray Data batch inference."""
+    if not RAY_AVAILABLE:
+        raise ImportError("Ray is not installed. Install with: pip install ray[data] vllm")
+
+    logger.info(f"Initializing Ray for vLLM batch inference...")
+
+    # Initialize Ray if not already initialized
+    if not ray.is_initialized():
+        ray.init(log_to_driver=False)
+
+    # Prepare data for Ray Dataset
+    data_rows = []
+    for case in cases:
+        article_title = ARTICLE_TITLES.get(case['article'], "Unknown")
+        prompt_text = EVALUATION_PROMPT_TEMPLATE.format(
+            case_text=case['text'],
+            article=case['article'],
+            article_title=article_title
+        )
+        data_rows.append({
+            'case_name': case['case_name'],
+            'prompt': prompt_text,
+            'actual': case['actual'],
+        })
+
+    # Create Ray Dataset
+    ds = ray.data.from_items(data_rows)
+
+    logger.info(f"Created Ray Dataset with {len(data_rows)} cases")
+
+    # Configure vLLM engine
+    config = vLLMEngineProcessorConfig(
+        model_source=model_id,
+        engine_kwargs={
+            "enable_chunked_prefill": True,
+            "max_num_batched_tokens": 4096,
+            "max_model_len": 16384,
+            "gpu_memory_utilization": 0.9,
+        },
+        concurrency=1,  # Number of parallel vLLM replicas
+        batch_size=32,   # Batch size for inference
+    )
+
+    # Build LLM processor
+    vllm_processor = build_llm_processor(
+        config,
+        preprocess=lambda row: dict(
+            messages=[
+                {
+                    "role": "system",
+                    "content": EVALUATION_SYSTEM_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": row["prompt"]
+                }
+            ],
+            sampling_params=dict(
+                temperature=temperature,
+                max_tokens=10,  # We only need 1 digit
+            )
+        ),
+        postprocess=lambda row: dict(
+            case_name=row["case_name"],
+            actual=row["actual"],
+            generated_text=row["generated_text"],
+            **row
+        ),
+    )
+
+    logger.info("Running vLLM batch inference...")
+
+    # Apply processor and collect results
+    ds = vllm_processor(ds)
+    results = ds.take_all()
+
+    # Extract ratings from results
+    ratings = []
+    for result in results:
+        rating = extract_rating_from_response(result['generated_text'])
+        ratings.append(rating)
+
+    logger.info(f"Completed vLLM batch inference for {len(ratings)} cases")
+
+    return ratings
+
+
 async def evaluate_case(case_text: str, article: str, model_id: str, api_key: str, temperature: float = 0.0) -> int:
     """Evaluate a single case and return rating (1-5)."""
     if '/' in model_id:
@@ -243,8 +354,9 @@ async def run_scenario(
     cases: List[Dict],
     strategies: Dict,
     model_id: str,
-    api_key: str,
+    api_key: Optional[str],
     temperature: float = 0.0,
+    use_vllm: bool = False,
 ) -> tuple[List[Dict], Dict]:
     """Run a single scenario."""
 
@@ -255,6 +367,7 @@ async def run_scenario(
     logger.info(f"Running scenario: {scenario_name}")
     logger.info(f"Description: {scenario['description']}")
     logger.info(f"Strategy keys: {', '.join(keys)}")
+    logger.info(f"Model: {model_id} ({'vLLM batch' if use_vllm else 'OpenAI API'})")
     logger.info(f"{'='*80}")
 
     # Check for conflicts
@@ -280,21 +393,39 @@ async def run_scenario(
     logger.info(f"\nStep 2: Evaluating {len(processed_cases)} cases with model {model_id}...")
 
     results = []
-    for i, case in enumerate(processed_cases, 1):
-        if i % 10 == 0 or i == 1:
-            logger.info(f"Evaluating case {i}/{len(processed_cases)}: {case['case_name']}")
 
-        rating = await evaluate_case(case['text'], case['article'], model_id, api_key, temperature)
+    if use_vllm:
+        # Use vLLM batch inference
+        ratings = evaluate_cases_vllm_batch(processed_cases, model_id, temperature)
 
-        is_violation = case['actual'] == 'violation'
-        distance_score = calculate_distance_score(rating, is_violation)
+        # Build results from batch ratings
+        for i, (case, rating) in enumerate(zip(processed_cases, ratings)):
+            is_violation = case['actual'] == 'violation'
+            distance_score = calculate_distance_score(rating, is_violation)
 
-        results.append({
-            'case_name': case['case_name'],
-            'actual': case['actual'],
-            'rating': rating,
-            'distance_score': distance_score,
-        })
+            results.append({
+                'case_name': case['case_name'],
+                'actual': case['actual'],
+                'rating': rating,
+                'distance_score': distance_score,
+            })
+    else:
+        # Use OpenAI API (async one-by-one)
+        for i, case in enumerate(processed_cases, 1):
+            if i % 10 == 0 or i == 1:
+                logger.info(f"Evaluating case {i}/{len(processed_cases)}: {case['case_name']}")
+
+            rating = await evaluate_case(case['text'], case['article'], model_id, api_key, temperature)
+
+            is_violation = case['actual'] == 'violation'
+            distance_score = calculate_distance_score(rating, is_violation)
+
+            results.append({
+                'case_name': case['case_name'],
+                'actual': case['actual'],
+                'rating': rating,
+                'distance_score': distance_score,
+            })
 
     # Calculate metrics
     logger.info("\nStep 3: Calculating metrics...")
@@ -454,10 +585,11 @@ async def run_all_scenarios(
     cases: List[Dict],
     strategies: Dict,
     model_id: str,
-    api_key: str,
+    api_key: Optional[str],
     output_dir: str,
     temperature: float = 0.0,
     skip_existing: bool = True,
+    use_vllm: bool = False,
 ):
     """Run all scenarios sequentially."""
 
@@ -489,6 +621,7 @@ async def run_all_scenarios(
             model_id=model_id,
             api_key=api_key,
             temperature=temperature,
+            use_vllm=use_vllm,
         )
 
         # Save results
@@ -552,13 +685,20 @@ def main():
         action='store_true',
         help='Run scenarios in parallel (evaluate all scenarios for each case simultaneously)'
     )
+    parser.add_argument(
+        '--use-vllm',
+        action='store_true',
+        help='Use vLLM with Ray Data for batch inference instead of OpenAI API'
+    )
 
     args = parser.parse_args()
 
-    # Load API key
-    api_key = os.environ.get('OPENAI_API_KEY')
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not found in environment")
+    # Load API key (only required for OpenAI)
+    api_key = None
+    if not args.use_vllm:
+        api_key = os.environ.get('OPENAI_API_KEY')
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY not found in environment. Set it or use --use-vllm flag.")
 
     # Load config
     logger.info(f"Loading config from {args.config}")
@@ -585,15 +725,22 @@ def main():
         cases = json.load(f)
     logger.info(f"Loaded {len(cases)} cases")
 
+    # Get model-specific output directory
+    model_output_dir = get_model_output_dir(args.output_dir, args.model)
+    logger.info(f"Results will be saved to: {model_output_dir}")
+
     # Run experiments (parallel or sequential)
     if args.parallel:
+        if args.use_vllm:
+            raise ValueError("Parallel mode (--parallel) is not compatible with vLLM batch mode (--use-vllm). vLLM already processes all cases in batch.")
+
         asyncio.run(run_all_scenarios_parallel(
             scenarios=scenarios_to_run,
             cases=cases,
             strategies=strategies,
             model_id=args.model,
             api_key=api_key,
-            output_dir=args.output_dir,
+            output_dir=str(model_output_dir),
             temperature=args.temperature,
             skip_existing=not args.force,
         ))
@@ -604,9 +751,10 @@ def main():
             strategies=strategies,
             model_id=args.model,
             api_key=api_key,
-            output_dir=args.output_dir,
+            output_dir=str(model_output_dir),
             temperature=args.temperature,
             skip_existing=not args.force,
+            use_vllm=args.use_vllm,
         ))
 
     logger.info("\n" + "="*80)
