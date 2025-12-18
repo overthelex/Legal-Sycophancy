@@ -347,9 +347,14 @@ async def evaluate_case(
                     {"role": "system", "content": EVALUATION_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=1,
+                max_tokens=10,  # Increased from 1 to handle cases where model needs more tokens
                 temperature=temperature,
             )
+
+            # Check if response is valid
+            if not response.choices or not response.choices[0].message.content:
+                logger.warning("Empty response from API, returning neutral rating")
+                return 3
 
             response_text = response.choices[0].message.content
             rating = extract_rating_from_response(response_text)
