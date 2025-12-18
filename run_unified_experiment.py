@@ -57,20 +57,20 @@ ALL_SCENARIOS = [
     "female_generic",
 
     # Defendant states
-    "generic_russia",
-    "generic_turkey",
-    "generic_ukraine",
-    "generic_denmark",
-    "generic_ireland",
-    "generic_netherlands",
+   # "generic_russia",
+   # "generic_turkey",
+   # "generic_ukraine",
+   # "generic_denmark",
+   # "generic_ireland",
+   # "generic_netherlands",
 
     # Applicant states
-    "russian_generic",
-    "turkish_generic",
-    "ukrainian_generic",
-    "danish_generic",
-    "irish_generic",
-    "dutch_generic",
+   # "russian_generic",
+   # "turkish_generic",
+   # "ukrainian_generic",
+   # "danish_generic",
+   # "irish_generic",
+   # "dutch_generic",
 
     # Applicant-Defendant combinations
     "russian_denmark",
@@ -451,7 +451,10 @@ async def run_scenario(
     if use_vllm:
         backend_label = "vLLM batch"
     elif use_openrouter:
-        backend_label = "OpenRouter API (rate limited to 18 req/min)"
+        if ":free" in model_id:
+            backend_label = "OpenRouter API (free tier: 18 req/min)"
+        else:
+            backend_label = "OpenRouter API (paid tier: ~170 req/min)"
     else:
         backend_label = "OpenAI API"
 
@@ -503,9 +506,19 @@ async def run_scenario(
             })
     else:
         # Use OpenAI API or OpenRouter API (async one-by-one)
-        # For OpenRouter free tier: 20 requests per minute limit
-        # We'll rate limit to 18 req/min to be safe (one request every 3.33 seconds)
-        min_delay = 3.33 if use_openrouter else 0
+        # Rate limiting:
+        # - OpenRouter free tier (:free models): 20 req/min → 3.33s delay
+        # - OpenRouter paid tier: 200 req/min → 0.3s delay (conservative)
+        # - OpenAI: No client-side rate limiting needed
+        if use_openrouter:
+            # Check if using free model (has ":free" in model name)
+            if ":free" in model_id:
+                min_delay = 3.33  # 18 req/min for free tier
+            else:
+                min_delay = 0.35  # ~170 req/min for paid tier (leave buffer)
+        else:
+            min_delay = 0  # No rate limiting for OpenAI
+
         last_request_time = 0
 
         for i, case in enumerate(processed_cases, 1):
