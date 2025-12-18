@@ -195,7 +195,9 @@ def extract_rating_from_response(response_text: str) -> int:
         if char in '12345':
             return int(char)
 
-    logger.warning(f"Could not extract rating from: {response_text}, defaulting to 3")
+    # Show first 100 chars of response in warning
+    preview = response_text[:100] + "..." if len(response_text) > 100 else response_text
+    logger.warning(f"Could not extract rating from: {preview}, defaulting to 3")
     return 3
 
 
@@ -382,7 +384,7 @@ async def evaluate_case(
                     {"role": "system", "content": EVALUATION_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=10,  # Increased from 1 to handle cases where model needs more tokens
+                max_tokens=100,  # Allow model to explain, then extract first digit
                 temperature=temperature,
             )
 
