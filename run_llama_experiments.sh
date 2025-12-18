@@ -16,8 +16,8 @@ export TRANSFORMERS_CACHE=~/scratch/hf_cache
 export HF_DATASETS_CACHE=~/scratch/hf_cache/datasets
 export HF_HUB_DOWNLOAD_TIMEOUT=120
 
-# Load modules
-module load gcc arrow
+# Load modules (load opencv BEFORE activating venv to avoid opencv-python conflict)
+module load gcc arrow opencv/4.8.1
 
 # Activate virtual environment
 source .venv/bin/activate
@@ -25,10 +25,19 @@ source .venv/bin/activate
 # Navigate to project directory
 cd /project/6105522/junkais/LLM-Human-Rights
 
-# Install requirements (including Ray and vLLM)
+# Install requirements (excluding opencv-python since we use the module)
 echo "Installing requirements..."
-pip install -q -r requirements.txt
-pip install -q "ray[data]>=2.44.1" vllm
+# Install base requirements (skip opencv-python)
+pip install -q pandas numpy scipy matplotlib seaborn openai python-dotenv
+
+# Install Ray and vLLM (critical for batch inference)
+echo "Installing Ray and vLLM..."
+pip install --no-cache-dir "ray[data]>=2.44.1" vllm
+
+# Verify installations
+echo "Verifying installations..."
+python -c "import ray; print(f'Ray version: {ray.__version__}')" || echo "ERROR: Ray not installed"
+python -c "import vllm; print(f'vLLM installed')" || echo "ERROR: vLLM not installed"
 
 # Create output directory
 mkdir -p slurm/output
