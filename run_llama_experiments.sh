@@ -31,8 +31,24 @@ echo "Installing requirements..."
 pip install -q pandas numpy scipy matplotlib seaborn openai python-dotenv
 
 # Install Ray and vLLM (critical for batch inference)
+# Skip opencv-python-headless since we're using the opencv module
 echo "Installing Ray and vLLM..."
-pip install --no-cache-dir "ray[data]>=2.44.1" vllm
+pip install --no-cache-dir "ray[data]>=2.44.1"
+
+# Install vLLM without opencv-python-headless dependency
+echo "Installing vLLM (skipping opencv dependency)..."
+pip install --no-cache-dir --no-deps vllm
+
+# Install vLLM dependencies manually (excluding opencv-python-headless)
+pip install --no-cache-dir \
+    transformers tokenizers \
+    fastapi uvicorn \
+    pydantic prometheus-client \
+    pillow tiktoken \
+    psutil \
+    aiohttp \
+    sentencepiece \
+    huggingface-hub
 
 # Verify installations
 echo "Verifying installations..."
