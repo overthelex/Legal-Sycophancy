@@ -35,4 +35,4 @@ hf_cache/
 *.egg
 *.egg-info
 dist
-build
+buildconfig.py
