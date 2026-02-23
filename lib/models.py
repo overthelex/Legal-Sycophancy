@@ -3,10 +3,10 @@ Model-specific API handling and configuration.
 """
 
 import openai
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, List, Optional
 
 
-def create_client(model_id: str, api_key: str, use_openrouter: bool) -> tuple[openai.AsyncOpenAI, str]:
+def create_client(model_id: str, api_key: str, use_openrouter: bool) -> Tuple[openai.AsyncOpenAI, str]:
     """
     Create API client and return (client, final_model_id).
 
@@ -39,7 +39,7 @@ def build_messages(
     system_prompt: str,
     user_prompt: str,
     model_id: str
-) -> list[Dict[str, str]]:
+) -> List[Dict[str, str]]:
     """
     Build messages array for API call, handling model-specific quirks.
 
@@ -64,9 +64,9 @@ def build_messages(
 
 def build_multiturn_messages(
     system_prompt: str,
-    conversation_turns: list[Dict[str, str]],
+    conversation_turns: List[Dict[str, str]],
     model_id: str
-) -> list[Dict[str, str]]:
+) -> List[Dict[str, str]]:
     """
     Build multi-turn conversation messages array, handling model-specific quirks.
 
@@ -107,7 +107,7 @@ def build_multiturn_messages(
 
 def build_api_params(
     model_id: str,
-    messages: list[Dict[str, str]],
+    messages: List[Dict[str, str]],
     temperature: float = 1.0,
     max_tokens: int = 100
 ) -> Dict[str, Any]:
@@ -149,7 +149,7 @@ def build_api_params(
     return api_params
 
 
-def get_response_content(response: Any) -> str | None:
+def get_response_content(response: Any) -> Optional[str]:
     """
     Extract content from API response.
 
@@ -162,3 +162,65 @@ def get_response_content(response: Any) -> str | None:
     if not response.choices or not response.choices[0].message.content:
         return None
     return response.choices[0].message.content.strip()
+
+
+def prepare_request(
+    custom_id: str,
+    model_id: str,
+    messages: List[Dict[str, str]],
+    api_key: str,
+    use_openrouter: bool,
+    temperature: float = 1.0,
+    max_tokens: int = 100
+) -> Dict[str, Any]:
+    """
+    Prepare a complete request dictionary for QueuedLLMClient.
+
+    This encapsulates all model-specific logic (GPT-5 parameters, etc.)
+    into a single function that generates queue-ready requests.
+
+    Args:
+        custom_id: Unique identifier for this request
+        model_id: Model identifier (can include / for OpenRouter)
+        messages: Pre-built messages array (use build_messages or build_multiturn_messages)
+        api_key: API key to use
+        use_openrouter: Whether to use OpenRouter backend
+        temperature: Sampling temperature (default: 1.0)
+        max_tokens: Maximum tokens to generate (default: 100)
+
+    Returns:
+        Request dictionary ready for QueuedLLMClient.execute_all()
+    """
+    # Determine backend
+    backend = 'openrouter' if use_openrouter else 'openai'
+
+    # For OpenAI direct, strip any / prefix from model name
+    final_model_id = model_id.split('/')[-1] if not use_openrouter and '/' in model_id else model_id
+
+    # Build request
+    request = {
+        'custom_id': custom_id,
+        'model': final_model_id,
+        'messages': messages,
+        'api_key': api_key,
+        'backend': backend
+    }
+
+    # Add model-specific parameters
+    # GPT-5 models use max_completion_tokens and reasoning_effort
+    if "gpt-5" in model_id.lower():
+        request['max_completion_tokens'] = 2048
+        request['reasoning_effort'] = 'low'
+        # Don't set temperature for GPT-5 (only supports default value of 1)
+
+    # Gemini uses higher max_tokens for reasoning
+    elif "gemini" in model_id.lower():
+        request['max_tokens'] = 4096
+        request['temperature'] = temperature
+
+    # Other models
+    else:
+        request['max_tokens'] = max_tokens
+        request['temperature'] = temperature
+
+    return request
