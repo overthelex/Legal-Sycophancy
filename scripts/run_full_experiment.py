@@ -43,6 +43,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 MODELS = {
+    # ── Anthropic (Bedrock) ──────────────────────────────────────────────
     "sonnet": {
         "display_name": "Claude Sonnet 4.6",
         "model_id": "us.anthropic.claude-sonnet-4-6-20250514-v1:0",
@@ -51,6 +52,45 @@ MODELS = {
         "input_cost_per_mtok": 3.0,
         "output_cost_per_mtok": 15.0,
     },
+    # ── OpenAI (OpenRouter) - big + mini ─────────────────────────────────
+    "gpt52": {
+        "display_name": "GPT-5.2",
+        "model_id": "openai/gpt-5.2",
+        "backend": "openai",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "input_cost_per_mtok": 2.50,
+        "output_cost_per_mtok": 10.0,
+    },
+    "gpt4omini": {
+        "display_name": "GPT-4o-mini",
+        "model_id": "openai/gpt-4o-mini",
+        "backend": "openai",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "input_cost_per_mtok": 0.15,
+        "output_cost_per_mtok": 0.60,
+    },
+    # ── Google (OpenRouter) - pro + flash ────────────────────────────────
+    "gemini_pro": {
+        "display_name": "Gemini Pro",
+        "model_id": "google/gemini-2.5-pro-preview",
+        "backend": "openai",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "input_cost_per_mtok": 1.25,
+        "output_cost_per_mtok": 10.0,
+    },
+    "gemini_flash": {
+        "display_name": "Gemini 3.1 Flash",
+        "model_id": "google/gemini-3.1-flash",
+        "backend": "openai",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "input_cost_per_mtok": 0.15,
+        "output_cost_per_mtok": 0.60,
+    },
+    # ── Open weight (cheap APIs) ─────────────────────────────────────────
     "deepseek": {
         "display_name": "DeepSeek V4",
         "model_id": "deepseek-chat",
@@ -60,23 +100,14 @@ MODELS = {
         "input_cost_per_mtok": 0.27,
         "output_cost_per_mtok": 1.10,
     },
-    "gpt4o": {
-        "display_name": "GPT-4o",
-        "model_id": "openai/gpt-4o",
+    "kimi": {
+        "display_name": "Kimi K2",
+        "model_id": "moonshot/kimi-k2",
         "backend": "openai",
         "base_url": "https://openrouter.ai/api/v1",
         "api_key_env": "OPENROUTER_API_KEY",
-        "input_cost_per_mtok": 2.50,
-        "output_cost_per_mtok": 10.0,
-    },
-    "gemini": {
-        "display_name": "Gemini 3.1 Flash",
-        "model_id": "google/gemini-3.1-flash",
-        "backend": "openai",
-        "base_url": "https://openrouter.ai/api/v1",
-        "api_key_env": "OPENROUTER_API_KEY",
-        "input_cost_per_mtok": 0.15,
-        "output_cost_per_mtok": 0.60,
+        "input_cost_per_mtok": 0.20,
+        "output_cost_per_mtok": 0.80,
     },
 }
 
@@ -644,7 +675,7 @@ def main():
         description="Full-scale perturbation experiment orchestrator.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Model keys: sonnet, deepseek, gpt4o, gemini
+Model keys: sonnet, gpt52, gpt4omini, gemini_pro, gemini_flash, deepseek, kimi
 RQ keys:    baseline, rq1, rq2, rq3
 
 Examples:
