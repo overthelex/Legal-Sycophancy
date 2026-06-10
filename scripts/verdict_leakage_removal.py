@@ -112,6 +112,7 @@ class CaseRecord:
     violation_label: str
     full_case_text: str
     decision_date: str = ""
+    respondent: str = ""
     full_case_text_no_verdict: str = ""
     verdict_removal_method: str = ""
     original_length: int = 0
@@ -356,6 +357,7 @@ def load_from_db(db_url: str, country: str = "", cutoff_date: str = "", end_date
                 violation_label=label,
                 full_case_text=full_text,
                 decision_date=decision_date_str,
+                respondent=respondent or "",
                 original_length=len(full_text),
             ))
 
@@ -428,6 +430,7 @@ def load_from_json(path: str, cutoff_date: str = "", end_date: str = "") -> list
             violation_label=item.get("violation_label", ""),
             full_case_text=item.get("full_case_text", item.get("case_text", "")),
             decision_date=date_str,
+            respondent=item.get("respondent", ""),
             original_length=len(item.get("full_case_text", item.get("case_text", ""))),
         ))
 
