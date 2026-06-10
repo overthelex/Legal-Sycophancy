@@ -25,6 +25,12 @@ Usage:
   # Dry run (stage 1 only, no LLM calls)
   python scripts/verdict_leakage_removal.py \
     --source db --country UKR --stage1-only --output /dev/stdout
+
+  # Time-windowed extraction ("Live" benchmark support)
+  python scripts/verdict_leakage_removal.py \
+    --source db --country UKR \
+    --cutoff-date 2024-01-01 --end-date 2025-01-01 \
+    --output data/processed/echr_cases_ukr_2024.json
 """
 
 import argparse
@@ -105,6 +111,7 @@ class CaseRecord:
     article: str
     violation_label: str
     full_case_text: str
+    decision_date: str = ""
     full_case_text_no_verdict: str = ""
     verdict_removal_method: str = ""
     original_length: int = 0
@@ -303,7 +310,7 @@ def stage3_repair(case: CaseRecord, leaking_sentences: list[str]) -> CaseRecord:
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 
-def load_from_db(db_url: str, country: str = "", cutoff_date: str = "", lang: str = "ENG") -> list[CaseRecord]:
+def load_from_db(db_url: str, country: str = "", cutoff_date: str = "", end_date: str = "", lang: str = "ENG") -> list[CaseRecord]:
     """Load ECtHR cases from PostgreSQL echr_cases table."""
     import psycopg2
 
@@ -318,6 +325,9 @@ def load_from_db(db_url: str, country: str = "", cutoff_date: str = "", lang: st
         if cutoff_date:
             conditions.append("kp_date >= %s")
             params.append(cutoff_date)
+        if end_date:
+            conditions.append("kp_date < %s")
+            params.append(end_date)
         if lang:
             conditions.append("language_iso = %s")
             params.append(lang)
@@ -326,7 +336,7 @@ def load_from_db(db_url: str, country: str = "", cutoff_date: str = "", lang: st
         conditions.append("doc_name NOT ILIKE %s")
         params.append("%Translation%")
 
-        query = f"SELECT item_id, doc_name, conclusion, full_text, respondent FROM echr_cases WHERE {' AND '.join(conditions)} ORDER BY item_id"
+        query = f"SELECT item_id, doc_name, conclusion, full_text, respondent, kp_date FROM echr_cases WHERE {' AND '.join(conditions)} ORDER BY item_id"
         cur.execute(query, params if params else None)
         rows = cur.fetchall()
     conn.close()
@@ -335,6 +345,8 @@ def load_from_db(db_url: str, country: str = "", cutoff_date: str = "", lang: st
     for row in rows:
         item_id, doc_name, conclusion, full_text = row[0], row[1], row[2], row[3]
         respondent = row[4] if len(row) > 4 else ""
+        kp_date = row[5] if len(row) > 5 else None
+        decision_date_str = str(kp_date) if kp_date else ""
         articles_violations = parse_conclusion(conclusion or "")
         for article, label in articles_violations:
             cases.append(CaseRecord(
@@ -343,6 +355,7 @@ def load_from_db(db_url: str, country: str = "", cutoff_date: str = "", lang: st
                 article=article,
                 violation_label=label,
                 full_case_text=full_text,
+                decision_date=decision_date_str,
                 original_length=len(full_text),
             ))
 
@@ -381,21 +394,46 @@ def parse_conclusion(conclusion: str) -> list[tuple[str, str]]:
     return results
 
 
-def load_from_json(path: str) -> list[CaseRecord]:
-    """Load cases from a JSON file."""
+def load_from_json(path: str, cutoff_date: str = "", end_date: str = "") -> list[CaseRecord]:
+    """Load cases from a JSON file, optionally filtering by date range."""
     with open(path) as f:
         data = json.load(f)
 
     cases = []
+    skipped_no_date = 0
+    skipped_out_of_range = 0
+
     for item in data:
+        # Try multiple possible date field names
+        date_val = (item.get("decision_date") or item.get("date")
+                    or item.get("kp_date") or item.get("judgment_date") or "")
+        date_str = str(date_val)[:10] if date_val else ""
+
+        # Apply date filters
+        if cutoff_date or end_date:
+            if not date_str:
+                skipped_no_date += 1
+                continue
+            if cutoff_date and date_str < cutoff_date:
+                skipped_out_of_range += 1
+                continue
+            if end_date and date_str >= end_date:
+                skipped_out_of_range += 1
+                continue
+
         cases.append(CaseRecord(
             item_id=item.get("item_id", ""),
             case_name=item.get("case_name", ""),
             article=item.get("article", ""),
             violation_label=item.get("violation_label", ""),
             full_case_text=item.get("full_case_text", item.get("case_text", "")),
+            decision_date=date_str,
             original_length=len(item.get("full_case_text", item.get("case_text", ""))),
         ))
+
+    if cutoff_date or end_date:
+        print(f"  Date filter: skipped {skipped_out_of_range} out-of-range, {skipped_no_date} missing date")
+
     return cases
 
 
@@ -510,7 +548,8 @@ def main():
     parser.add_argument("--db", default="dbname=secondlayer_prod user=secondlayer password=secondlayer host=172.18.0.13")
     parser.add_argument("--country", default="", help="Respondent country code (empty = all countries)")
     parser.add_argument("--lang", default="ENG", help="Language ISO code filter (ENG, FRE, etc.)")
-    parser.add_argument("--cutoff-date", default="", help="Only include cases after this date")
+    parser.add_argument("--cutoff-date", default="", help="Only include cases decided on or after this date (YYYY-MM-DD)")
+    parser.add_argument("--end-date", default="", help="Only include cases decided before this date (YYYY-MM-DD, exclusive)")
     parser.add_argument("--input", help="Input JSON file (when --source json)")
     parser.add_argument("--output", default="data/processed/echr_cases_clean.json")
     parser.add_argument("--workers", type=int, default=5)
@@ -526,14 +565,29 @@ def main():
     MIN_VERDICT_FREE_LENGTH = args.min_length
 
     # Load cases
+    # Date range summary
+    date_range_parts = []
+    if args.cutoff_date:
+        date_range_parts.append(f"from {args.cutoff_date}")
+    if args.end_date:
+        date_range_parts.append(f"until {args.end_date}")
+    date_range_str = " ".join(date_range_parts) if date_range_parts else "all dates"
+
     if args.source == "db":
-        print(f"Loading cases from database (country={args.country or 'ALL'}, lang={args.lang}, cutoff={args.cutoff_date or 'none'})...")
-        cases = load_from_db(args.db, args.country, args.cutoff_date, args.lang)
+        print(f"Loading cases from database (country={args.country or 'ALL'}, lang={args.lang}, dates={date_range_str})...")
+        cases = load_from_db(args.db, args.country, args.cutoff_date, args.end_date, args.lang)
     else:
-        print(f"Loading cases from {args.input}...")
-        cases = load_from_json(args.input)
+        print(f"Loading cases from {args.input} (dates={date_range_str})...")
+        cases = load_from_json(args.input, args.cutoff_date, args.end_date)
 
     print(f"Loaded {len(cases)} case-article pairs")
+
+    # Print date range summary
+    dates = sorted([c.decision_date for c in cases if c.decision_date])
+    if dates:
+        print(f"  Date range in dataset: {dates[0]} to {dates[-1]} ({len(set(dates))} distinct dates)")
+    elif args.cutoff_date or args.end_date:
+        print(f"  Warning: no date information available on loaded cases")
 
     if not cases:
         print("No cases to process.")

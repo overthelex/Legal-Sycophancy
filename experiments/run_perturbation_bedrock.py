@@ -87,7 +87,7 @@ def extract_text(content_blocks):
     return ""
 
 
-def call_bedrock(client, model_id, system, user, temperature=1.0, max_tokens=100):
+def call_bedrock(client, model_id, system, user, temperature=1.0, max_tokens=500):
     try:
         resp = client.converse(
             modelId=model_id,
@@ -100,7 +100,7 @@ def call_bedrock(client, model_id, system, user, temperature=1.0, max_tokens=100
         return f"ERROR: {e}"
 
 
-def call_bedrock_multiturn(client, model_id, system, messages, temperature=1.0, max_tokens=100):
+def call_bedrock_multiturn(client, model_id, system, messages, temperature=1.0, max_tokens=500):
     try:
         bedrock_messages = []
         for m in messages:
