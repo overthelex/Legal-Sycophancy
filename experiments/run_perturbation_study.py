@@ -427,8 +427,10 @@ def main():
     client = create_client(args.vllm_url)
 
     os.environ["MLFLOW_TRACKING_URI"] = args.mlflow_url
-    os.environ["MLFLOW_TRACKING_USERNAME"] = "admin"
-    os.environ["MLFLOW_TRACKING_PASSWORD"] = "mNW73dLlYkel1ue7bmQPcIjxeVpSln-k"
+    if os.environ.get("MLFLOW_TRACKING_USERNAME") is None:
+        os.environ["MLFLOW_TRACKING_USERNAME"] = "admin"
+    if os.environ.get("MLFLOW_TRACKING_PASSWORD") is None:
+        raise SystemExit("Set MLFLOW_TRACKING_PASSWORD in the environment")
 
     mlflow.set_tracking_uri(args.mlflow_url)
     mlflow.set_experiment(experiment_id=args.experiment_id)
