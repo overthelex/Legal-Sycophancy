@@ -34,10 +34,10 @@ DEFAULT_OUTPUT = REPO_ROOT / "data" / "processed" / "echr_livehrb_static_2k.json
 
 # Fields we carry through verbatim if present on the source row.
 PASSTHROUGH_FIELDS = [
-    "item_id", "case_name", "respondent", "article", "violation_label",
-    "verdict_removal_method", "original_length", "verdict_free_length",
-    "retention_percentage", "decision_date", "application_number",
-    "importance", "ecli", "group",
+    "item_id", "case_name", "respondent", "article", "article_full",
+    "violation_label", "verdict_removal_method", "original_length",
+    "verdict_free_length", "retention_percentage", "decision_date",
+    "application_number", "importance", "ecli", "group",
 ]
 
 VALID_LABELS = {"violation", "no_violation"}
@@ -84,7 +84,8 @@ def convert(rows, full_judgments_only: bool):
     out = []
     skipped_genre = 0
     skipped_bad = 0
-    remapped = 0
+    n_full = 0      # rows keyed on the corrected article_full code
+    n_remap = 0     # rows using the interim 1->P1-1 fallback (no article_full)
     for r in rows:
         item_id = str(r.get("item_id", ""))
 
@@ -100,18 +101,26 @@ def convert(rows, full_judgments_only: bool):
             continue
 
         rec = {k: r[k] for k in PASSTHROUGH_FIELDS if k in r}
-        # Normalize collapsed protocol article keys (see ARTICLE_KEY_REMAP).
-        if rec.get("article") in ARTICLE_KEY_REMAP:
+        # Prefer the corrected full ECHR code (v1.2 `article_full`: P1-1, P4-2,
+        # P7-4, ...). Fall back to the interim protocol remap only if the source
+        # row has no article_full (older sets).
+        af = (str(r.get("article_full") or "")).strip()
+        if af:
+            rec["article"] = af
+            n_full += 1
+        elif rec.get("article") in ARTICLE_KEY_REMAP:
             rec["article"] = ARTICLE_KEY_REMAP[rec["article"]]
-            remapped += 1
+            n_remap += 1
         # The rename: contamination runners read full_case_text / *_no_verdict.
         rec["full_case_text"] = text
         rec["full_case_text_no_verdict"] = text
         out.append(rec)
 
-    if remapped:
-        print(f"  Remapped {remapped} article keys via ARTICLE_KEY_REMAP "
-              f"({ARTICLE_KEY_REMAP}).")
+    if n_full:
+        print(f"  Keyed {n_full} rows on article_full (corrected ECHR codes).")
+    if n_remap:
+        print(f"  Remapped {n_remap} rows via interim fallback "
+              f"({ARTICLE_KEY_REMAP}) — no article_full present.")
     if skipped_genre:
         print(f"  Dropped {skipped_genre} Information-Note (002-*) rows "
               f"[--full-judgments-only].")

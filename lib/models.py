@@ -146,6 +146,16 @@ def build_api_params(
         api_params["max_tokens"] = 4096
         api_params["temperature"] = temperature
 
+    # Qwen3 reasons by default; give it room so visible content isn't empty
+    elif "qwen" in model_id.lower():
+        api_params["max_tokens"] = 8192
+        api_params["temperature"] = temperature
+
+    # Claude extended thinking counts against max_tokens; give headroom
+    elif "claude" in model_id.lower():
+        api_params["max_tokens"] = 16000
+        api_params["temperature"] = temperature
+
     # Other models
     else:
         api_params["max_tokens"] = max_tokens
@@ -228,6 +238,19 @@ def prepare_request(
     # Give it room so the final 1-5 answer surfaces in `content`.
     elif "deepseek-v4" in model_id.lower():
         request['max_tokens'] = 4096
+        request['temperature'] = temperature
+
+    # Qwen3 reasons by default too (60%+ empty at 100 tokens); give it room.
+    # Smaller Qwen (8B) reasons verbosely relative to competence, so budget higher.
+    elif "qwen" in model_id.lower():
+        request['max_tokens'] = 8192
+        request['temperature'] = temperature
+
+    # Claude with extended thinking counts thinking+answer against max_tokens and
+    # can spend >13k on one prompt; give headroom so it can't truncate silently
+    # (per Vladimir's Opus 5 smoke). Terse prompt keeps it near 0 in practice.
+    elif "claude" in model_id.lower():
+        request['max_tokens'] = 16000
         request['temperature'] = temperature
 
     # Other models

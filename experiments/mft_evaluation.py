@@ -33,11 +33,18 @@ from lib.metrics import calculate_accuracy
 #   curl -s https://openrouter.ai/api/v1/models -H "Authorization: Bearer $OPENROUTER_API_KEY"
 # LATEST FRONTIER flagships (one per major lab, verified on account 2026-07-11):
 EVALUATORS = {
-    "gpt-5.6":         {"model_id": "openai/gpt-5.6-sol",             "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
-    "claude-opus-4.8": {"model_id": "anthropic/claude-opus-4.8",     "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
-    "claude-sonnet-5": {"model_id": "anthropic/claude-sonnet-5",     "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
-    "deepseek-v4":     {"model_id": "deepseek/deepseek-v4-pro",      "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
-    "gemini-3.5-flash":{"model_id": "google/gemini-3.5-flash",       "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
+    # --- cross-lab flagships (1 per lab) ---
+    "gpt-5.6":           {"model_id": "openai/gpt-5.6-sol",           "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
+    "claude-opus-4.8":   {"model_id": "anthropic/claude-opus-4.8",   "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
+    "gemini-3.5-flash":  {"model_id": "google/gemini-3.5-flash",     "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
+    "deepseek-v4":       {"model_id": "deepseek/deepseek-v4-pro",    "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
+    # --- size track (open-weight ladders) ---
+    "deepseek-v4-flash": {"model_id": "deepseek/deepseek-v4-flash",  "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
+    "qwen3-8b":          {"model_id": "qwen/qwen3-8b",               "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
+    "qwen3-32b":         {"model_id": "qwen/qwen3-32b",              "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
+    "qwen3-235b":        {"model_id": "qwen/qwen3-235b-a22b",        "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
+    # second Claude kept for reference; team chose ONE Claude for the balanced roster:
+    # "claude-sonnet-5": {"model_id": "anthropic/claude-sonnet-5",   "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
     # --- previous-gen comparators (already run on 2K; uncomment to redo) ---
     # "gpt-5.2":          {"model_id": "openai/gpt-5.2",              "use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
     # "claude-sonnet-4.5":{"model_id": "anthropic/claude-sonnet-4.5","use_openrouter": True, "api_key_env": "OPENROUTER_API_KEY"},
