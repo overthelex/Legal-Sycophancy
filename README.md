@@ -186,6 +186,93 @@ python scripts/rq3_statistical_tests.py
 - DeepSeek-V3.2 shows 100% alignment (most consistent)
 - Change rates: 1.8% (DeepSeek) to 20.8% (GPT-4o)
 
+## Contamination & Robustness Diagnostics
+
+Two diagnostics on the LiveHumanRightsBench static-2k set: an **MFT competence baseline**
+(can the models do the task at all?) and a **state-swap perturbation** (do the models change
+their verdict when only the respondent country changes?). Both use the verdict-free ECtHR task,
+an ordinal 1-5 rating averaged over N=10 samples at temperature 1.0, collapsed to violation (1-2),
+abstention (3), no-violation (4-5). Each `(case, arm, sample)` is an independent, stateless API
+call carrying only the system prompt and that one case; no conversation history or context is
+shared across calls, so different arms cannot influence one another regardless of call order.
+
+### Reading the numbers: why raw accuracy is misleading
+
+The test set is heavily imbalanced: of 2,000 cases, **1,673 (83.7%) are real violations** and
+only **327 (16.4%) are no-violation**. A lazy model that ignores the case and always answers
+"violation" therefore scores **83.7%** for free, so raw accuracy near 80% is *not* a sign of
+skill. We report **balanced accuracy** (mean of the per-class accuracies, so always guessing one
+side scores 0.50) as the honest metric. The gold label on every case is the court's *actual*
+ruling, so accuracy measures agreement with the real ECtHR judges; 100% would mean perfectly
+reproducing their verdicts — it is not a measured human-prediction baseline, which we have not run.
+
+### MFT competence baseline (8 models)
+
+| Model | Raw acc | **Balanced acc** | Violation acc | No-violation acc |
+|---|---|---|---|---|
+| gpt-5.6 (sol)     | 82.8% | **0.744** | 86.8% | 62.1% |
+| gemini-3.5-flash  | 82.8% | **0.714** | 88.4% | 54.4% |
+| claude-opus-4.8   | 81.2% | **0.687** | 87.2% | 50.2% |
+| deepseek-v4-pro   | 81.0% | **0.645** | 88.9% | 40.1% |
+| deepseek-v4-flash | 80.9% | **0.637** | 89.2% | 38.2% |
+| qwen3-235b        | 75.1% | **0.629** | 81.1% | 44.6% |
+| qwen3-32b         | 75.6% | **0.565** | 84.9% | 28.1% |
+| qwen3-8b          | 67.1% | **0.470** | 76.9% | 17.1% |
+
+- **No model beats the always-violation baseline (83.7%) on raw accuracy.** gpt-5.6 and gemini
+  tie it; everyone else is below. The high-looking accuracy is mostly the models leaning the way
+  the data leans.
+- **Every model is violation-biased.** Violation accuracy is 77-89%, but no-violation accuracy
+  collapses from 62% (gpt-5.6) to 17% (qwen3-8b); Opus is at a coin-flip 50%. Models are far
+  better at confirming a violation than at recognizing its absence.
+- **Competence scales cleanly with size.** The Qwen ladder is monotonic (8b -> 32b -> 235b:
+  0.470 -> 0.565 -> 0.629 balanced). DeepSeek flash ~ pro, i.e. distillation costs almost nothing
+  here.
+
+### State-swap perturbation — nationality (10 models)
+
+Each case appears in four arms: `control_original` (real country), `control_neutral` (Iceland,
+a neutral filler), `probe_ukraine`, `probe_russia`, with facts held byte-identical across arms
+(anonymize-then-fill; fact preservation is enforced programmatically, and a human-annotated
+subset is prepared for additional confirmation). Headline effect is
+**Delta = probe_ukraine minus control_neutral**: how many of 816 paired cases flip *into* a
+violation when the respondent is relabeled Ukraine. Significance is a two-sided **McNemar exact
+test** on the discordant (into-violation vs out-of-violation) pairs.
+
+| Model | Flip rate | **Ukraine net (of 816)** | McNemar p | Russia net | Real-country net |
+|---|---|---|---|---|---|
+| claude-opus-4.8   | 1.6% | **-6**  | 0.146 (ns) | -5 | -3 |
+| gemini-3.5-flash  | 1.3% | **0**   | 1.000 (ns) | +1 | -1 |
+| gpt-5.6 (sol)     | 1.6% | **+3**  | 0.549 (ns) | +3 | +3 |
+| gpt-5.6-terra     | 2.3% | **+7**  | 0.143 (ns) | +8 | +4 |
+| gpt-5.6-luna      | 2.2% | **+12** | 0.008 (*)  | +7 | +8 |
+| qwen3-235b        | 3.3% | **+13** | 0.015 (*)  | +16 | +0 |
+| deepseek-v4-pro   | 2.3% | **+14** | 0.001 (*)  | +17 | +10 |
+| qwen3-8b          | 8.6% | **+16** | 0.040 (*)  | +13 | +5 |
+| qwen3-32b         | 4.0% | **+21** | <0.001 (*) | +22 | +11 |
+| deepseek-v4-flash | 3.4% | **+21** | <0.001 (*) | +23 | +13 |
+
+- **The pure country prior is statistically null for every flagship.** The Ukraine swap is not
+  significant for Opus (p=0.15), gemini (p=1.0), gpt-5.6 (p=0.55) or gpt-5.6-terra (p=0.14). It is
+  significant only for the cheaper models (deepseek and qwen variants, p<0.05, several p<0.001).
+  gpt-5.6-luna is the one frontier variant that reaches significance (p=0.008). Even where
+  significant the magnitude is small (at most ~2.6% of cases, 21/816).
+- **Russia ~ Ukraine.** The two probes move verdicts almost identically, so it is a generic
+  "adversarial-state" lean, not anything Ukraine-specific.
+- **The neutral filler is a fair baseline.** Using the *real* respondent country instead of the
+  neutral filler (`control_original` column) reproduces the same pattern at similar or smaller
+  magnitude (flagships within +-3), so the probe effects are not an artifact of using a placebo
+  country.
+- **The earlier MFT "Ukraine gap" was mostly a time confound, not a country prior.** This
+  perturbation isolates nationality from the year/recency signal, and once isolated, nationality
+  alone barely moves the frontier models — the key negative result.
+
+**Takeaway.** Frontier models look ~80% accurate but that is baseline-driven; real skill
+(balanced ~0.7) is modest and strongly violation-biased, and they are **statistically robust to
+the metadata (nationality) swap**. This localizes the vulnerability: it is *not* in the
+respondent-country field. Whether it lives in the phrasing and counterfactual-fact axes (untested
+on this frontier roster) is the next question.
+
 ## Rating Scale
 
 All experiments use a 1-5 Likert scale:
