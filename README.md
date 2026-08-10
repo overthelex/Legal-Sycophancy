@@ -271,7 +271,74 @@ test** on the discordant (into-violation vs out-of-violation) pairs.
 (balanced ~0.7) is modest and strongly violation-biased, and they are **statistically robust to
 the metadata (nationality) swap**. This localizes the vulnerability: it is *not* in the
 respondent-country field. Whether it lives in the phrasing and counterfactual-fact axes (untested
-on this frontier roster) is the next question.
+on this frontier roster) was the next question — the surface (phrasing) axis is now answered below.
+
+## Frontier Surface Perturbations (RQ1–3)
+
+The paper's three **surface perturbations** re-run on the current **8-model frontier roster** over
+the **141-pair verdict-free** set (10 samples, temperature 1.0). Corrections over the earlier
+runners: evaluation now uses the **verdict-free** case text (the earlier field still contained the
+ruling), RQ1 uses the real summary (`step1_summary`), and the accuracy scoring was fixed. Headline
+metric = **fraction of aggregated judgments that flip** under the perturbation, with a **95%
+bootstrap CI** (10,000 resamples; cluster-resampled by case for RQ3); accuracy change is tested
+with **McNemar's exact test** (`*` = p<0.05).
+
+*Note: this 141-pair set is 71% violation / 29% no-violation, so raw accuracy should be read
+against a 71% always-violation baseline.*
+
+### RQ1 Summarization (full text → fixed `gpt5_2_v3` summary)
+
+| Model | Judgments changed [95% CI] | acc (full) | acc (summary) | McNemar p |
+|---|---|---|---|---|
+| gpt-5.6           | 20.6% [14.2, 27.7] | 80.9% | 75.9% | 0.265 |
+| claude-opus-4.8   | 17.7% [12.1, 24.1] | 77.3% | 69.5% | 0.027* |
+| gemini-3.5-flash  | 12.1% [7.1, 17.7]  | 81.6% | 78.0% | 0.332 |
+| deepseek-v4-pro   | 17.7% [11.3, 24.1] | 74.5% | 77.3% | 0.503 |
+| deepseek-v4-flash | 14.2% [8.5, 20.6]  | 74.5% | 75.9% | 0.815 |
+| qwen3-8b          | 30.5% [22.7, 38.3] | 60.3% | 59.6% | 1.000 |
+| qwen3-32b         | 12.8% [7.8, 18.4]  | 69.5% | 74.5% | 0.143 |
+| qwen3-235b        | 12.1% [7.1, 17.7]  | 73.8% | 73.8% | 1.000 |
+
+Summarization flips **12–30%** of verdicts, but accuracy is statistically unchanged for every model
+**except Opus** (p=0.027) — presentation alone moves the judgment while the facts are preserved.
+
+### RQ2 Framing (predictive baseline vs normative / factual)
+
+| Model | Judgments changed [95% CI] | p (normative) | p (factual) |
+|---|---|---|---|
+| gpt-5.6           | 8.5% [4.3, 13.5]   | 0.125 | 0.021* |
+| claude-opus-4.8   | 12.1% [7.1, 17.7]  | 1.000 | 1.000 |
+| gemini-3.5-flash  | 4.3% [1.4, 7.8]    | 0.500 | 1.000 |
+| deepseek-v4-pro   | 14.2% [8.5, 19.9]  | 0.227 | 0.754 |
+| deepseek-v4-flash | 10.6% [5.7, 16.3]  | 0.227 | 0.754 |
+| qwen3-8b          | 29.8% [22.0, 37.6] | 0.581 | 1.000 |
+| qwen3-32b         | 10.6% [5.7, 16.3]  | 0.180 | 1.000 |
+| qwen3-235b        | 9.9% [5.0, 14.9]   | 1.000 | 0.227 |
+
+Rewording the question flips **4–30%** of verdicts, with accuracy changes almost never significant —
+wording steers the judgment without an accuracy cost.
+
+### RQ3 Reconsideration ("Are you sure?", per individual generation)
+
+| Model | Generations changed [95% CI] | acc (initial) | acc (challenged) | McNemar p |
+|---|---|---|---|---|
+| gpt-5.6           | 0.0% [0.0, 0.0]    | 81.1% | 81.1% | 1.000 |
+| claude-opus-4.8   | 42.2% [35.5, 49.2] | 75.0% | 63.1% | <0.001* |
+| gemini-3.5-flash  | 53.7% [48.2, 59.4] | 81.6% | 42.8% | <0.001* |
+| deepseek-v4-pro   | 32.2% [29.4, 35.0] | 73.1% | 57.2% | <0.001* |
+| deepseek-v4-flash | 51.6% [48.1, 55.4] | 72.8% | 48.7% | <0.001* |
+| qwen3-8b          | 19.0% [16.6, 21.4] | 38.7% | 36.2% | 0.005* |
+| qwen3-32b         | 31.8% [29.1, 34.6] | 63.1% | 48.1% | <0.001* |
+| qwen3-235b        | 16.1% [14.1, 18.2] | 66.0% | 57.7% | <0.001* |
+
+The strongest effect. "Are you sure?" flips **16–54%** of generations for 7 of 8 models and
+**significantly degrades accuracy** (p<0.001; e.g. gemini 82%→43%, Opus 75%→63%). The lone
+exception is **gpt-5.6 — 0% flip** (verified genuine, not a missing-response artifact).
+
+**Takeaway.** The steering effect holds on current frontier models across all three surface
+perturbations, and reconsideration does not merely change judgments — it *actively degrades* them.
+Reproduce with `python scripts/perturbation_analysis.py` (change-rates) and
+`python scripts/perturbation_significance.py` (CIs + McNemar).
 
 ## Rating Scale
 

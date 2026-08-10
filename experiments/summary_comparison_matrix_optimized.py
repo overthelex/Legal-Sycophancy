@@ -36,26 +36,14 @@ from lib.metrics import calculate_accuracy
 
 # Evaluator model configurations
 EVALUATORS = {
-    'gpt-4o': {
-        'model_id': 'gpt-4o',
-        'use_openrouter': False,
-        'api_key_env': 'OPENAI_API_KEY'
-    },
-    'gpt-5.2': {
-        'model_id': 'gpt-5.2',
-        'use_openrouter': False,
-        'api_key_env': 'OPENAI_API_KEY'
-    },
-    'claude-sonnet-4.5': {
-        'model_id': 'anthropic/claude-sonnet-4.5',
-        'use_openrouter': True,
-        'api_key_env': 'OPENROUTER_API_KEY'
-    },
-    'deepseek-v3.2': {
-        'model_id': 'deepseek/deepseek-v3.2',
-        'use_openrouter': True,
-        'api_key_env': 'OPENROUTER_API_KEY'
-    }
+    'gpt-5.6':           {'model_id': 'openai/gpt-5.6-sol',         'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'claude-opus-4.8':   {'model_id': 'anthropic/claude-opus-4.8',  'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'gemini-3.5-flash':  {'model_id': 'google/gemini-3.5-flash',    'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'deepseek-v4':       {'model_id': 'deepseek/deepseek-v4-pro',   'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'deepseek-v4-flash': {'model_id': 'deepseek/deepseek-v4-flash', 'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'qwen3-8b':          {'model_id': 'qwen/qwen3-8b',              'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'qwen3-32b':         {'model_id': 'qwen/qwen3-32b',             'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'qwen3-235b':        {'model_id': 'qwen/qwen3-235b-a22b',       'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
 }
 
 # Summary file configurations
@@ -152,7 +140,7 @@ def evaluate_text_type(
         # Calculate binary prediction accuracy
         is_accurate = calculate_accuracy(
             case_result['avg_rating'],
-            case_result['violation_label']
+            case_result['violation_label'] == 'violation'
         )
 
         rows.append({
@@ -246,13 +234,13 @@ def main():
             # Load appropriate data
             if text_type == 'full_text':
                 cases = base_cases
-                text_field = 'full_case_text'
+                text_field = 'full_case_text_no_verdict'
                 text_label = 'full_text'
             else:
                 # Load summary data
                 summary_cases = load_summary_data(text_type)
                 cases = summary_cases
-                text_field = 'summary'
+                text_field = 'step1_summary'
                 text_label = text_type
 
             # Evaluate

@@ -29,32 +29,21 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.queued_client import QueuedLLMClient
-from lib.evaluation import prepare_evaluation_requests, prepare_multiturn_requests, extract_rating_from_response
+from lib.evaluation import prepare_evaluation_requests, prepare_multiturn_requests, extract_rating_from_response, make_custom_id
 from lib.prompts import EVALUATION_SYSTEM_PROMPT, BASELINE_EVALUATION_TEMPLATE
 from lib.metrics import calculate_accuracy
 
 # Evaluator model configurations
+# Roster kept in sync with experiments/mft_evaluation.py (the 3 validated models).
 EVALUATORS = {
-    'gpt-4o': {
-        'model_id': 'gpt-4o',
-        'use_openrouter': False,
-        'api_key_env': 'OPENAI_API_KEY'
-    },
-    'gpt-5.2': {
-        'model_id': 'gpt-5.2',
-        'use_openrouter': False,
-        'api_key_env': 'OPENAI_API_KEY'
-    },
-    'claude-sonnet-4.5': {
-        'model_id': 'anthropic/claude-sonnet-4.5',
-        'use_openrouter': True,
-        'api_key_env': 'OPENROUTER_API_KEY'
-    },
-    'deepseek-v3.2': {
-        'model_id': 'deepseek/deepseek-v3.2',
-        'use_openrouter': True,
-        'api_key_env': 'OPENROUTER_API_KEY'
-    }
+    'gpt-5.6':           {'model_id': 'openai/gpt-5.6-sol',         'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'claude-opus-4.8':   {'model_id': 'anthropic/claude-opus-4.8',  'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'gemini-3.5-flash':  {'model_id': 'google/gemini-3.5-flash',    'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'deepseek-v4':       {'model_id': 'deepseek/deepseek-v4-pro',   'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'deepseek-v4-flash': {'model_id': 'deepseek/deepseek-v4-flash', 'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'qwen3-8b':          {'model_id': 'qwen/qwen3-8b',              'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'qwen3-32b':         {'model_id': 'qwen/qwen3-32b',             'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
+    'qwen3-235b':        {'model_id': 'qwen/qwen3-235b-a22b',       'use_openrouter': True, 'api_key_env': 'OPENROUTER_API_KEY'},
 }
 
 # Challenge prompt
@@ -110,7 +99,7 @@ def evaluate_with_challenge(
         num_samples=num_samples,
         temperature=temperature,
         max_tokens=100,
-        case_text_key='full_case_text'
+        case_text_key='full_case_text_no_verdict'
     )
 
     print(f"Prepared {len(initial_requests)} initial requests")
@@ -162,7 +151,7 @@ def evaluate_with_challenge(
         item_id = case.get('item_id', case.get('case_name', 'unknown'))
 
         for sample_idx in range(num_samples):
-            custom_id = f"{item_id}_sample_{sample_idx}"
+            custom_id = make_custom_id(case, sample_idx)
             followup_id = f"{custom_id}_followup"
 
             # Extract initial rating
@@ -188,12 +177,15 @@ def evaluate_with_challenge(
             total_evaluations += 1
 
             # Calculate accuracy for both
-            is_accurate_initial = calculate_accuracy(initial_rating, case['violation_label'])
-            is_accurate_challenged = calculate_accuracy(challenged_rating, case['violation_label'])
+            is_accurate_initial = calculate_accuracy(initial_rating, case['violation_label'] == 'violation')
+            is_accurate_challenged = calculate_accuracy(challenged_rating, case['violation_label'] == 'violation')
 
             rows.append({
+                'item_id': item_id,
                 'case_name': case['case_name'],
                 'article': case['article'],
+                'group': case.get('group'),
+                'respondent': case.get('respondent'),
                 'violation_label': case['violation_label'],
                 'sample_idx': sample_idx,
                 'initial_rating': initial_rating,
