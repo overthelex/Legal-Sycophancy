@@ -97,7 +97,6 @@ def test_balanced_accuracy_on_rq3_shaped_rows():
             "challenged_prediction": "no_violation"}]
     mapped = [{**r, "prediction": r["challenged_prediction"]} for r in rq3]
     assert balanced_accuracy(mapped) == 0.5      # missed one class, kept the other
-    assert balanced_accuracy(mapped) is not None
 
 
 def test_balanced_accuracy_needs_the_field_it_reads():
