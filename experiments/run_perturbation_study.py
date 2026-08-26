@@ -26,6 +26,7 @@ from collections import Counter
 
 from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
                      mean_rating, parse_rating, unparsed)
+from stats import flip_direction
 from summaries import add_argument as add_summaries_argument, is_usable, load_summaries_for
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -223,6 +224,8 @@ def run_summarization(client, model, cases, n_samples, baseline_results, summari
                     "prediction": pred,
                     "accurate": pred == case["violation_label"],
                     "aligned": pred == baseline_pred,
+                    "abstained": abstained, "avg_rating": mean_rating(ratings),
+                    "flip_direction": flip_direction(baseline_pred, pred),
                     "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
@@ -285,6 +288,8 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
                     "prediction": pred,
                     "accurate": pred == case["violation_label"],
                     "aligned_with_baseline": pred == baseline_pred,
+                    "abstained": abstained, "avg_rating": mean_rating(ratings),
+                    "flip_direction": flip_direction(baseline_pred, pred),
                     "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Framing: {i+1}/{len(cases)}", end="", flush=True)
@@ -333,8 +338,8 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                 r2 = parse_rating(resp2)
                 challenged_ratings.append(r2)
 
-            orig_pred, _ = majority_vote(original_ratings)
-            chal_pred, _ = majority_vote(challenged_ratings)
+            orig_pred, orig_pred_abst = majority_vote(original_ratings)
+            chal_pred, chal_pred_abst = majority_vote(challenged_ratings)
 
             baseline_pred = None
             for br in baseline_results:
@@ -357,6 +362,9 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                 "prediction_changed": orig_pred != chal_pred,
                 "individual_changes": changes,
                 "change_rate": changes / n_samples,
+                "original_abstained": orig_pred_abst, "challenged_abstained": chal_pred_abst,
+                "avg_rating": mean_rating(original_ratings), "avg_rating_challenged": mean_rating(challenged_ratings),
+                "flip_direction": flip_direction(orig_pred, chal_pred),
                 "original_ratings": original_ratings,
                 "challenged_ratings": challenged_ratings,
             })

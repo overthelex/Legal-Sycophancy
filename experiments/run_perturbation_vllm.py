@@ -12,6 +12,7 @@ from run_perturbation_bedrock import (
 )
 from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
                      mean_rating, parse_rating, unparsed)
+from stats import flip_direction
 from summaries import add_argument as add_summaries_argument, is_usable, load_summaries_for
 
 
@@ -82,10 +83,10 @@ def run_summarization(client, model, cases, n_samples, baseline_results, summari
                 at = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
                 prompt = PREDICTIVE_TEMPLATE.format(case_text=summary_text, article=case["article"], article_title=at)
                 ratings = [parse_rating(call_vllm(client, model, SYSTEM_PROMPT, prompt)) for _ in range(n_samples)]
-                pred, _ = majority_vote(ratings)
+                pred, abstained = majority_vote(ratings)
                 results.append({"item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "summary_version": v,
-                    "prediction": pred, "accurate": pred==case["violation_label"], "aligned": pred==bp, "ratings": ratings, "n_unparsed": count_unparsed(ratings)})
+                    "prediction": pred, "accurate": pred==case["violation_label"], "aligned": pred==bp, "abstained": abstained, "avg_rating": mean_rating(ratings), "flip_direction": flip_direction(bp, pred), "ratings": ratings, "n_unparsed": count_unparsed(ratings)})
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
         if skipped_no_summary:
             mlflow.log_metric("rq1_skipped_no_summary", skipped_no_summary)
@@ -129,13 +130,13 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
                     with mlflow.start_span(name=f"{fname}") as fs:
                         fs.set_inputs({"framing": fname, "prompt_snippet": prompt[:200] + "..."})
                         ratings = [parse_rating(call_vllm(client, model, SYSTEM_PROMPT, prompt)) for _ in range(n_samples)]
-                        pred, _ = majority_vote(ratings)
+                        pred, abstained = majority_vote(ratings)
                         framing_preds[fname] = pred
-                        fs.set_outputs({"prediction": pred, "ratings": ratings,
+                        fs.set_outputs({"prediction": pred, "abstained": abstained, "avg_rating": mean_rating(ratings), "flip_direction": flip_direction(bp, pred), "ratings": ratings,
                             "accurate": pred==case["violation_label"], "aligned": pred==bp})
                     results.append({"item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                         "violation_label": case["violation_label"], "framing": fname,
-                        "prediction": pred, "accurate": pred==case["violation_label"], "aligned_with_baseline": pred==bp, "ratings": ratings, "n_unparsed": count_unparsed(ratings)})
+                        "prediction": pred, "accurate": pred==case["violation_label"], "aligned_with_baseline": pred==bp, "abstained": abstained, "avg_rating": mean_rating(ratings), "flip_direction": flip_direction(bp, pred), "ratings": ratings, "n_unparsed": count_unparsed(ratings)})
                 case_span.set_outputs({"predictions": framing_preds, "any_disagreement": len(set(framing_preds.values()))>1})
             print(f"\r  Framing: {i+1}/{len(cases)}", end="", flush=True)
         for fn in framings:
@@ -177,8 +178,8 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                         ss.set_inputs({"original_response": r1_text, "challenge": RECONSIDERATION_PROMPT})
                         ss.set_outputs({"challenged_response": r2_text, "original_rating": r1,
                             "challenged_rating": r2, "changed": r1!=r2, "direction": direction})
-                op, _ = majority_vote(orig)
-                cp, _ = majority_vote(chal)
+                op, op_abst = majority_vote(orig)
+                cp, cp_abst = majority_vote(chal)
                 changes = sum(1 for o,c in zip(orig,chal) if o!=c)
                 case_span.set_outputs({"original_prediction": op, "challenged_prediction": cp,
                     "prediction_changed": op!=cp, "individual_change_rate": changes/n_samples})
@@ -186,7 +187,7 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                 "violation_label": case["violation_label"], "original_prediction": op,
                 "challenged_prediction": cp, "original_accurate": op==case["violation_label"],
                 "challenged_accurate": cp==case["violation_label"], "prediction_changed": op!=cp,
-                "change_rate": changes/n_samples, "original_ratings": orig, "challenged_ratings": chal})
+                "change_rate": changes/n_samples, "original_abstained": op_abst, "challenged_abstained": cp_abst, "avg_rating": mean_rating(orig), "avg_rating_challenged": mean_rating(chal), "flip_direction": flip_direction(op, cp), "original_ratings": orig, "challenged_ratings": chal})
             print(f"\r  Reconsideration: {i+1}/{len(cases)}", end="", flush=True)
         oa = sum(r["original_accurate"] for r in results)/len(results)
         ca = sum(r["challenged_accurate"] for r in results)/len(results)

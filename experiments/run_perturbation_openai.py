@@ -32,6 +32,7 @@ import mlflow
 from checkpoint import Checkpoint
 from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
                      mean_rating, parse_rating, unparsed)
+from stats import flip_direction
 from summaries import add_argument as add_summaries_argument, is_usable, load_summaries_for
 
 # ── Prompts (shared with bedrock runner) ──────────────────────────────────
@@ -193,12 +194,15 @@ def run_summarization(client, model, cases, n_samples, baseline_results, summari
                 for _ in range(n_samples):
                     resp = call_openai(client, model, SYSTEM_PROMPT, prompt)
                     ratings.append(parse_rating(resp))
-                pred, _ = majority_vote(ratings)
+                pred, abstained = majority_vote(ratings)
                 ckpt.record(key, {
                     "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "summary_version": v,
                     "prediction": pred, "accurate": pred == case["violation_label"],
-                    "aligned": pred == baseline_pred, "ratings": ratings, "n_unparsed": count_unparsed(ratings),
+                    "aligned": pred == baseline_pred, "abstained": abstained,
+                    "avg_rating": mean_rating(ratings),
+                    "flip_direction": flip_direction(baseline_pred, pred),
+                    "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
         summary_results = ckpt.rows()
@@ -244,12 +248,15 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results, ck
                 for _ in range(n_samples):
                     resp = call_openai(client, model, SYSTEM_PROMPT, prompt)
                     ratings.append(parse_rating(resp))
-                pred, _ = majority_vote(ratings)
+                pred, abstained = majority_vote(ratings)
                 ckpt.record(key, {
                     "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "framing": fname,
                     "prediction": pred, "accurate": pred == case["violation_label"],
-                    "aligned_with_baseline": pred == baseline_pred, "ratings": ratings, "n_unparsed": count_unparsed(ratings),
+                    "aligned_with_baseline": pred == baseline_pred, "abstained": abstained,
+                    "avg_rating": mean_rating(ratings),
+                    "flip_direction": flip_direction(baseline_pred, pred),
+                    "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Framing: {i+1}/{len(cases)}", end="", flush=True)
         results = ckpt.rows()
@@ -293,8 +300,8 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results, ckpt=
                 resp2 = call_openai_multiturn(client, model, SYSTEM_PROMPT, messages)
                 r2 = parse_rating(resp2)
                 chal_ratings.append(r2)
-            orig_pred, _ = majority_vote(orig_ratings)
-            chal_pred, _ = majority_vote(chal_ratings)
+            orig_pred, orig_abstained = majority_vote(orig_ratings)
+            chal_pred, chal_abstained = majority_vote(chal_ratings)
             baseline_pred = next((r["prediction"] for r in baseline_results
                                   if r["item_id"] == case["item_id"] and r["article"] == case["article"]), None)
             changed_samples = sum(1 for o, c in zip(orig_ratings, chal_ratings) if o != c)
@@ -303,6 +310,10 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results, ckpt=
                 "violation_label": case["violation_label"], "baseline_prediction": baseline_pred,
                 "original_prediction": orig_pred, "challenged_prediction": chal_pred,
                 "changed": orig_pred != chal_pred, "change_pct": changed_samples / n_samples,
+                "original_abstained": orig_abstained, "challenged_abstained": chal_abstained,
+                "avg_rating": mean_rating(orig_ratings),
+                "avg_rating_challenged": mean_rating(chal_ratings),
+                "flip_direction": flip_direction(orig_pred, chal_pred),
                 "original_ratings": orig_ratings, "challenged_ratings": chal_ratings,
                 "ratings": orig_ratings + chal_ratings,
                 "n_unparsed": count_unparsed(orig_ratings + chal_ratings),

@@ -252,3 +252,26 @@ def test_baseline_is_joined_by_item_id_not_case_name():
     for path in runners:
         src = path.read_text()
         assert not re.search(r'\["case_name"\]\s*==\s*case\["case_name"\]', src), path.name
+
+
+def test_every_result_row_keeps_its_abstentions_and_flip_direction():
+    """Only baseline used to record these; every other arm threw them away.
+
+    The thread with Yu Fan and Terry settled on reporting confidence, abstention
+    and flip direction alongside accuracy. A flip rate without direction cannot
+    distinguish drift toward "violation" from drift away from it, and an arm that
+    silently drops abstentions reports a prediction where the model gave none.
+    """
+    from pathlib import Path
+    for path in sorted((Path(__file__).resolve().parent.parent / "experiments")
+                       .glob("run_perturbation_*.py")):
+        src = path.read_text()
+        for block in _stored_rows(src):
+            if '"original_ratings"' in block or '"challenged_ratings"' in block:
+                assert '"original_abstained"' in block, f"{path.name}: rq3 row"
+                assert '"flip_direction"' in block, f"{path.name}: rq3 row"
+                continue
+            assert '"abstained"' in block, f"{path.name}: {block[:90]}"
+            assert '"avg_rating"' in block, f"{path.name}: {block[:90]}"
+            if '"aligned' in block:      # arms compared against baseline
+                assert '"flip_direction"' in block, f"{path.name}: {block[:90]}"

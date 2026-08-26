@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
                      mean_rating, parse_rating, unparsed)
+from stats import flip_direction
 from summaries import add_argument as add_summaries_argument, is_usable, load_summaries_for
 
 import boto3
@@ -184,12 +185,15 @@ def run_summarization(client, model, cases, n_samples, baseline_results, summari
                 for _ in range(n_samples):
                     resp = call_bedrock(client, model, SYSTEM_PROMPT, prompt)
                     ratings.append(parse_rating(resp))
-                pred, _ = majority_vote(ratings)
+                pred, abstained = majority_vote(ratings)
                 summary_results.append({
                     "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "summary_version": v,
                     "prediction": pred, "accurate": pred == case["violation_label"],
-                    "aligned": pred == baseline_pred, "ratings": ratings, "n_unparsed": count_unparsed(ratings),
+                    "aligned": pred == baseline_pred, "abstained": abstained,
+                    "avg_rating": mean_rating(ratings),
+                    "flip_direction": flip_direction(baseline_pred, pred),
+                    "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
         if skipped_no_summary:
@@ -240,16 +244,16 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
                         for s in range(n_samples):
                             resp = call_bedrock(client, model, SYSTEM_PROMPT, prompt)
                             ratings.append(parse_rating(resp))
-                        pred, _ = majority_vote(ratings)
+                        pred, abstained = majority_vote(ratings)
                         framing_preds[fname] = pred
-                        framing_span.set_outputs({"prediction": pred, "ratings": ratings,
+                        framing_span.set_outputs({"prediction": pred, "abstained": abstained, "avg_rating": mean_rating(ratings), "flip_direction": flip_direction(_bp, pred), "ratings": ratings,
                             "accurate": pred == _case["violation_label"], "aligned": pred == _bp})
 
                     results.append({
                         "item_id": _case["item_id"], "case_name": _case["case_name"], "article": _case["article"],
                         "violation_label": _case["violation_label"], "framing": fname,
                         "prediction": pred, "accurate": pred == _case["violation_label"],
-                        "aligned_with_baseline": pred == _bp, "ratings": ratings, "n_unparsed": count_unparsed(ratings),
+                        "aligned_with_baseline": pred == _bp, "abstained": abstained, "avg_rating": mean_rating(ratings), "flip_direction": flip_direction(_bp, pred), "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                     })
                 return {"predictions": framing_preds, "any_disagreement": len(set(framing_preds.values())) > 1}
 
@@ -302,11 +306,14 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                         sample_span.set_outputs({"challenged_response": resp2, "original_rating": r1,
                             "challenged_rating": r2, "changed": changed, "direction": direction})
 
-                orig_pred, _ = majority_vote(orig_ratings)
-                chal_pred, _ = majority_vote(chal_ratings)
+                orig_pred, orig_pred_abst = majority_vote(orig_ratings)
+                chal_pred, chal_pred_abst = majority_vote(chal_ratings)
                 changes = sum(1 for o, c in zip(orig_ratings, chal_ratings) if o != c)
                 case_span.set_outputs({"original_prediction": orig_pred, "challenged_prediction": chal_pred,
                     "prediction_changed": orig_pred != chal_pred, "individual_change_rate": changes / n_samples,
+                    "original_abstained": orig_pred_abst, "challenged_abstained": chal_pred_abst,
+                    "avg_rating": mean_rating(orig_ratings), "avg_rating_challenged": mean_rating(chal_ratings),
+                    "flip_direction": flip_direction(orig_pred, chal_pred),
                     "original_ratings": orig_ratings, "challenged_ratings": chal_ratings})
             results.append({
                 "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
@@ -316,6 +323,9 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                 "challenged_accurate": chal_pred == case["violation_label"],
                 "prediction_changed": orig_pred != chal_pred,
                 "change_rate": changes / n_samples,
+                "original_abstained": orig_pred_abst, "challenged_abstained": chal_pred_abst,
+                "avg_rating": mean_rating(orig_ratings), "avg_rating_challenged": mean_rating(chal_ratings),
+                "flip_direction": flip_direction(orig_pred, chal_pred),
                 "original_ratings": orig_ratings, "challenged_ratings": chal_ratings,
             })
             print(f"\r  Reconsideration: {i+1}/{len(cases)}", end="", flush=True)
