@@ -82,3 +82,27 @@ def test_flip_direction_distinguishes_the_two_directions():
     assert flip_direction("violation", "violation") is None
     assert flip_direction(None, "violation") is None
     assert flip_direction("violation", None) is None
+
+
+def test_balanced_accuracy_on_rq3_shaped_rows():
+    """RQ3 rows name their two answers separately, not `prediction`.
+
+    The analysis maps them before calling the shared helpers. This is asserted
+    because the omission survived one run: the slice it ran on held a single
+    class, and balanced_accuracy returns early before it reaches the field.
+    """
+    rq3 = [{"violation_label": "violation", "original_prediction": "violation",
+            "challenged_prediction": "no_violation"},
+           {"violation_label": "no_violation", "original_prediction": "no_violation",
+            "challenged_prediction": "no_violation"}]
+    mapped = [{**r, "prediction": r["challenged_prediction"]} for r in rq3]
+    assert balanced_accuracy(mapped) == 0.5      # missed one class, kept the other
+    assert balanced_accuracy(mapped) is not None
+
+
+def test_balanced_accuracy_needs_the_field_it_reads():
+    """A row without the prediction key is a bug, not a None result."""
+    import pytest
+    rows = [{"violation_label": "violation"}, {"violation_label": "no_violation"}]
+    with pytest.raises(KeyError):
+        balanced_accuracy(rows)

@@ -98,10 +98,20 @@ def main():
                 groups[str(r.get(variant_key, "")) if variant_key else ""].append(r)
             for variant, subset in sorted(groups.items()):
                 if arm == "rq3":
-                    # RQ3's own control is the first answer, not the baseline arm
+                    # RQ3's own control is the first answer, not the baseline arm.
+                    # Its rows name the two answers separately, so map them onto the
+                    # field names the shared helpers read -- otherwise balanced
+                    # accuracy reaches for `prediction` and finds nothing. That went
+                    # unnoticed once because the slice it ran on held a single class,
+                    # and balanced accuracy returns early before touching the field.
                     for r in subset:
-                        r["accurate"] = r.get("challenged_prediction") == r["violation_label"]
-                    ref = [{**r, "accurate": r.get("original_prediction") == r["violation_label"]}
+                        r["prediction"] = r.get("challenged_prediction")
+                        r["abstained"] = r.get("challenged_abstained")
+                        r["accurate"] = r["prediction"] == r["violation_label"]
+                    ref = [{**r,
+                            "prediction": r.get("original_prediction"),
+                            "abstained": r.get("original_abstained"),
+                            "accurate": r.get("original_prediction") == r["violation_label"]}
                            for r in subset]
                     n01, n10 = paired(ref, subset, variant)
                 else:
