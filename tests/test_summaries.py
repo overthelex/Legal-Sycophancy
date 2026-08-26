@@ -109,3 +109,43 @@ def test_digest_identifies_the_file_not_its_name():
     assert file_digest(a.name) != file_digest(b.name)
     assert file_digest(a.name) == file_digest(a.name)
     os.unlink(a.name); os.unlink(b.name)
+
+
+# --- the summariser can recognise a case and supply the verdict -----------------
+
+def test_recalled_verdict_is_caught():
+    """Real examples from the first frozen build, whose sources had none of this."""
+    from summaries import asserts_outcome
+    source = "The applicant complained about the length of the proceedings."
+    for leaked in [
+        "In its judgment of 10 March 2020 the Court found no violation.",
+        "Consequently the Court found no violation of Article 8.",
+        "The Court found a violation of Article 6 § 1: the restriction was disproportionate.",
+        "It therefore held that there had been no violation of Article 6.",
+    ]:
+        assert asserts_outcome(leaked, source), leaked
+
+
+def test_an_outcome_the_source_reports_is_not_a_leak():
+    """Domestic and prior-judgment outcomes belong to the factual record."""
+    from summaries import asserts_outcome
+    source = ("The Constitutional Court found no violation of the applicant's right "
+              "to a fair hearing and dismissed the appeal.")
+    summary = "The domestic court found no violation and the applicant appealed."
+    assert not asserts_outcome(summary, source)
+
+
+def test_an_ordinary_summary_is_left_alone():
+    from summaries import asserts_outcome
+    source = "The applicant was detained in a cell of 2.5 square metres for 14 months."
+    summary = ("The applicant was held in a cell affording 2.5 square metres of personal "
+               "space for fourteen months and complained under Article 3.")
+    assert not asserts_outcome(summary, source)
+
+
+def test_missing_input_is_handled_the_safe_way():
+    from summaries import asserts_outcome
+    assert not asserts_outcome(None, "text")
+    assert not asserts_outcome("", "text")
+    # No source to justify it means nothing justifies it, so it is a leak.
+    assert asserts_outcome("The Court found a violation.", None)

@@ -13,6 +13,7 @@ Summaries are therefore built once by scripts/build_summaries.py and loaded here
 
 import hashlib
 import json
+import re
 import os
 import sys
 
@@ -47,6 +48,34 @@ def load_summaries(path):
     if isinstance(blob, dict) and "summaries" in blob:
         return blob["summaries"], {k: v for k, v in blob.items() if k != "summaries"}
     return blob, {}
+
+
+# The summariser reads verdict-free text, but it can still recognise the case and
+# supply the outcome from memory. On the first frozen build 39 of 2,928 summaries
+# asserted a conclusion that appears nowhere in their source -- "the Court found no
+# violation of Article 8" against text whose operative part was cut out. That hands
+# the answer to the very arm the summary feeds, so those samples are rejected and
+# drawn again.
+_STATES_OUTCOME = re.compile(
+    r"(the Court (found|held|concluded|ruled)[^.]{0,60}(violation|no violation)"
+    r"|there (has|had) been (a|no) violation"
+    r"|(was|were) found to (have )?violat)", re.I)
+
+# Deliberately looser than the summary pattern: if the source discusses an outcome
+# at all, the summary repeating one is reportage rather than recall, and rejecting
+# a good summary costs a few cents while keeping a leaking one costs the arm.
+_SOURCE_DISCUSSES_OUTCOME = re.compile(
+    r"(found|held|concluded|ruled)[^.]{0,80}(violation|no violation)"
+    r"|there (has|had) been (a|no) violation", re.I)
+
+
+def asserts_outcome(summary, source_text):
+    """True when the summary states a conclusion its source never mentions."""
+    if not summary or not isinstance(summary, str):
+        return False
+    if not _STATES_OUTCOME.search(summary):
+        return False
+    return not _SOURCE_DISCUSSES_OUTCOME.search(source_text or "")
 
 
 def file_digest(path, length=12):

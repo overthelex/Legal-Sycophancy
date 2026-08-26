@@ -31,7 +31,7 @@ from openai import OpenAI
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "experiments"))
 from checkpoint import Checkpoint          # noqa: E402
 from scoring import MAX_CASE_CHARS         # noqa: E402
-from summaries import SUMMARY_TEMPLATE, is_usable   # noqa: E402
+from summaries import SUMMARY_TEMPLATE, asserts_outcome, is_usable   # noqa: E402
 
 
 def summarise(client, model, case, max_tokens, attempts=3):
@@ -58,6 +58,12 @@ def summarise(client, model, case, max_tokens, attempts=3):
                 usage["prompt"] += resp.usage.prompt_tokens or 0
                 usage["completion"] += resp.usage.completion_tokens or 0
             content = (resp.choices[0].message.content or "").strip()
+            if content and asserts_outcome(content, text):
+                # The model recognised the case and supplied the verdict. Draw again
+                # rather than keep it: this summary would hand the answer to the arm
+                # it feeds. Same prompt, same summariser, just a rejected sample.
+                last = "ERROR: summary asserted an outcome absent from the source"
+                continue
             if content:
                 return content, usage
             last = f"ERROR: empty content at max_tokens={limit}"
@@ -66,6 +72,33 @@ def summarise(client, model, case, max_tokens, attempts=3):
             last = f"ERROR: {e}"
             time.sleep(2 * (attempt + 1))
     return last, usage
+
+
+def rescreen(path, judgments):
+    """Drop checkpointed summaries that state an outcome their source never had.
+
+    Rewrites the checkpoint without them, so the ordinary resume path regenerates
+    exactly those and nothing else.
+    """
+    if not os.path.exists(path):
+        return 0
+    kept, dropped = [], 0
+    for line in open(path):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        source = judgments.get(row["item_id"], {}).get("text", "")
+        if asserts_outcome(row.get("summary"), source):
+            dropped += 1
+        else:
+            kept.append(row)
+    with open(path, "w") as f:
+        for row in kept:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return dropped
 
 
 def main():
@@ -82,6 +115,9 @@ def main():
     p.add_argument("--max-tokens", type=int, default=4000)
     p.add_argument("--limit", type=int, help="first N judgments, for a dry run")
     p.add_argument("--no-resume", action="store_true")
+    p.add_argument("--rescreen", action="store_true",
+                   help="re-check summaries already in the checkpoint and regenerate "
+                        "any that assert an outcome their source never mentions")
     args = p.parse_args()
 
     api_key = os.environ.get(args.api_key_env, "")
@@ -106,6 +142,10 @@ def main():
     print(f"Instances: {len(instances)}  judgments: {len(judgments)}"
           f"{f' (limited to {len(cases)})' if args.limit else ''}")
     print(f"Versions: {args.versions}  ->  {len(cases) * args.versions:,} calls\n")
+
+    if args.rescreen:
+        dropped = rescreen(args.out + ".jsonl", judgments)
+        print(f"Rescreen: dropped {dropped} summaries that asserted an outcome\n")
 
     ckpt = Checkpoint(args.out + ".jsonl", enabled=not args.no_resume)
     if ckpt.resumed:
