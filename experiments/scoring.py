@@ -31,9 +31,23 @@ from collections import Counter
 # did, and part of the measured summarisation effect was plain truncation.
 MAX_CASE_CHARS = 50_000
 
-# A standalone 1-5 digit. The lookarounds keep multi-digit numbers -- HTTP status
-# codes above all -- from being read as ratings.
-RATING = re.compile(r"(?<![0-9])([1-5])(?![0-9])")
+# A 0-100 likelihood, anchored at the end of the response so that numbers quoted
+# in a preamble (article numbers, paragraph references, HTTP status codes) cannot
+# be mistaken for the answer.
+#
+# The scale replaced a 1-5 rating that collapsed in practice: across 555 samples
+# it returned only 1 and 5, never 2-4, which made the abstention band unreachable
+# and confidence unmeasurable. On the percentage scale the same models still
+# concentrate at the extremes -- only 4 of 555 answers fell in the uncertain band
+# -- but that is now a measurement rather than an artefact of the instrument.
+RATING = re.compile(r"(?<![0-9.])(\d{1,3})\s*%?\s*[.]?\s*$")
+
+# A trailing number is only the answer if it is not the tail of a citation: a model
+# replying "Article 8" would otherwise be scored 8, i.e. a confident no-violation.
+CITATION_TAIL = re.compile(r"(?:article|paragraph|protocol|no\.|§)\s*\d{1,3}\s*%?\s*[.]?\s*$", re.I)
+
+VIOLATION_ABOVE = 60    # a violation prediction
+NO_VIOLATION_BELOW = 40  # a no-violation prediction; between the two is abstention
 
 # Counts responses that carried no rating. Read it after a run: a non-zero value
 # means calls failed, and those rows are not abstentions.
@@ -41,12 +55,13 @@ unparsed = Counter()
 
 
 def parse_rating(response, tag="unknown"):
-    """Return the 1-5 rating, or None when the response does not contain one."""
+    """Return the 0-100 likelihood, or None when the response does not carry one."""
     if not response:
         unparsed[tag] += 1
         return None
-    match = RATING.search(str(response).strip())
-    if match is None:
+    text = str(response).strip()
+    match = RATING.search(text)
+    if match is None or CITATION_TAIL.search(text) or not 0 <= int(match.group(1)) <= 100:
         unparsed[tag] += 1
         return None
     return int(match.group(1))
@@ -63,9 +78,9 @@ def majority_vote(ratings):
         return None, False
     thresholded = []
     for rating in parsed:
-        if rating <= 2:
+        if rating > VIOLATION_ABOVE:
             thresholded.append("violation")
-        elif rating >= 4:
+        elif rating < NO_VIOLATION_BELOW:
             thresholded.append("no_violation")
         else:
             thresholded.append("abstention")
