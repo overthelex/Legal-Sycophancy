@@ -96,6 +96,11 @@ RECONSIDERATION_PROMPT = (
 
 ATTEMPTS = 4
 
+# Sized from measurement, not from the length of the expected answer: the prompt
+# asks for a bare number, but a reasoning model spends thousands of tokens before
+# emitting it. deepseek-v4-pro returns empty 8/8 at 500 and 5/20 at 4,000.
+MAX_COMPLETION_TOKENS = 8000
+
 
 def _complete(client, model, api_messages, temperature, max_tokens):
     """One completion, retried, because at 20 workers rate limits are normal traffic.
@@ -108,6 +113,14 @@ def _complete(client, model, api_messages, temperature, max_tokens):
     models spend their budget before emitting content, so repeating the call at the
     original limit buys the same empty response again: four such retries cost $8 in
     three minutes once already.
+
+    The ceiling starts high rather than escalating from a tight one. Measured on
+    deepseek-v4-pro, which needs ~3,100 completion tokens to answer "give me a
+    number": at max_tokens=500 it returns empty 8 times out of 8, at 4,000 it still
+    fails a quarter of the time, at 8,000 it never does. A ceiling is a cap and not
+    a reservation -- gemini-3.5-flash averages 850 tokens whether the cap is 4,000 or
+    16,000 -- so starting low buys nothing and costs the full budget of every empty
+    response it causes.
     """
     limit = max_tokens
     for attempt in range(ATTEMPTS):
@@ -127,13 +140,13 @@ def _complete(client, model, api_messages, temperature, max_tokens):
     return f"ERROR: empty content after {ATTEMPTS} attempts, last limit {limit}"
 
 
-def call_openai(client, model, system, user, temperature=1.0, max_tokens=500):
+def call_openai(client, model, system, user, temperature=1.0, max_tokens=MAX_COMPLETION_TOKENS):
     return _complete(client, model, [{"role": "system", "content": system},
                                      {"role": "user", "content": user}],
                      temperature, max_tokens)
 
 
-def call_openai_multiturn(client, model, system, messages, temperature=1.0, max_tokens=500):
+def call_openai_multiturn(client, model, system, messages, temperature=1.0, max_tokens=MAX_COMPLETION_TOKENS):
     api_messages = [{"role": "system", "content": system}]
     api_messages += [{"role": m["role"], "content": m["content"]} for m in messages]
     return _complete(client, model, api_messages, temperature, max_tokens)
