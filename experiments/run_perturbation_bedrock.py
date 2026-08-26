@@ -14,8 +14,8 @@ import argparse, json, os, time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from scoring import (MAX_CASE_CHARS, majority_vote, mean_rating,
-                     parse_rating, unparsed)
+from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
+                     mean_rating, parse_rating, unparsed)
 
 import boto3
 import mlflow
@@ -144,10 +144,11 @@ def run_baseline(client, model, cases, n_samples):
                 ratings.append(parse_rating(resp))
             pred, abstained = majority_vote(ratings)
             results.append({
-                "case_name": case["case_name"], "article": case["article"],
+                "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                 "violation_label": case["violation_label"], "prediction": pred,
                 "accurate": pred == case["violation_label"], "abstained": abstained,
                 "ratings": ratings, "avg_rating": mean_rating(ratings),
+                "n_unparsed": count_unparsed(ratings),
             })
             acc = sum(r["accurate"] for r in results) / len(results)
             print(f"\r  Baseline: {i+1}/{len(cases)} | acc={acc:.2f}", end="", flush=True)
@@ -190,10 +191,10 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
                     ratings.append(parse_rating(resp))
                 pred, _ = majority_vote(ratings)
                 summary_results.append({
-                    "case_name": case["case_name"], "article": case["article"],
+                    "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "summary_version": v,
                     "prediction": pred, "accurate": pred == case["violation_label"],
-                    "aligned": pred == baseline_pred, "ratings": ratings,
+                    "aligned": pred == baseline_pred, "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
         accuracy = sum(r["accurate"] for r in summary_results) / len(summary_results)
@@ -233,7 +234,7 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
 
                     with mlflow.start_span(name=f"{fname}") as framing_span:
                         framing_span.set_inputs({"framing": fname, "prompt_snippet": prompt[:200] + "...",
-                            "case_name": _case["case_name"], "article": _case["article"],
+                            "item_id": _case["item_id"], "case_name": _case["case_name"], "article": _case["article"],
                             "violation_label": _case["violation_label"], "baseline_prediction": str(_bp)})
                         for s in range(n_samples):
                             resp = call_bedrock(client, model, SYSTEM_PROMPT, prompt)
@@ -244,10 +245,10 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
                             "accurate": pred == _case["violation_label"], "aligned": pred == _bp})
 
                     results.append({
-                        "case_name": _case["case_name"], "article": _case["article"],
+                        "item_id": _case["item_id"], "case_name": _case["case_name"], "article": _case["article"],
                         "violation_label": _case["violation_label"], "framing": fname,
                         "prediction": pred, "accurate": pred == _case["violation_label"],
-                        "aligned_with_baseline": pred == _bp, "ratings": ratings,
+                        "aligned_with_baseline": pred == _bp, "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                     })
                 return {"predictions": framing_preds, "any_disagreement": len(set(framing_preds.values())) > 1}
 
@@ -277,7 +278,7 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
             orig_ratings, chal_ratings = [], []
 
             with mlflow.start_span(name=f"recon|{case_label}") as case_span:
-                case_span.set_attributes({"case_name": case["case_name"], "article": case["article"],
+                case_span.set_attributes({"item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"]})
                 sample_traces = []
 
@@ -307,7 +308,7 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                     "prediction_changed": orig_pred != chal_pred, "individual_change_rate": changes / n_samples,
                     "original_ratings": orig_ratings, "challenged_ratings": chal_ratings})
             results.append({
-                "case_name": case["case_name"], "article": case["article"],
+                "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                 "violation_label": case["violation_label"],
                 "original_prediction": orig_pred, "challenged_prediction": chal_pred,
                 "original_accurate": orig_pred == case["violation_label"],

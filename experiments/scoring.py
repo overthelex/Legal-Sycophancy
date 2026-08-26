@@ -88,6 +88,16 @@ def majority_vote(ratings):
     return top[0], top[0] == "abstention"
 
 
+def count_unparsed(ratings):
+    """How many samples in this row carried no rating.
+
+    The raw `ratings` list keeps None for a failed call, which is the honest record
+    but trips any analysis that reaches for min/max/sum without filtering. Storing
+    the count alongside means a reader does not have to infer it.
+    """
+    return sum(1 for r in ratings if r is None)
+
+
 def mean_rating(ratings):
     """Mean of the parsed samples, or None when none parsed.
 

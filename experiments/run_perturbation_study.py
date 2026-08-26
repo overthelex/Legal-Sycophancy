@@ -24,8 +24,8 @@ import os
 import time
 from collections import Counter
 
-from scoring import (MAX_CASE_CHARS, majority_vote, mean_rating,
-                     parse_rating, unparsed)
+from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
+                     mean_rating, parse_rating, unparsed)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import mlflow
@@ -172,6 +172,7 @@ def run_baseline(client, model, cases, n_samples, parent_run_id):
             accurate = pred == case["violation_label"]
 
             results.append({
+                "item_id": case["item_id"],
                 "case_name": case["case_name"],
                 "article": case["article"],
                 "violation_label": case["violation_label"],
@@ -179,6 +180,7 @@ def run_baseline(client, model, cases, n_samples, parent_run_id):
                 "accurate": accurate,
                 "abstained": abstained,
                 "ratings": ratings,
+                "n_unparsed": count_unparsed(ratings),
                 "avg_rating": mean_rating(ratings),
             })
             print(f"\r  Baseline: {i+1}/{len(cases)} | acc={sum(r['accurate'] for r in results)/len(results):.2f}", end="", flush=True)
@@ -232,6 +234,7 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
                         break
 
                 summary_results.append({
+                    "item_id": case["item_id"],
                     "case_name": case["case_name"],
                     "article": case["article"],
                     "violation_label": case["violation_label"],
@@ -239,7 +242,7 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
                     "prediction": pred,
                     "accurate": pred == case["violation_label"],
                     "aligned": pred == baseline_pred,
-                    "ratings": ratings,
+                    "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
 
@@ -287,6 +290,7 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
                 pred, abstained = majority_vote(ratings)
 
                 framing_results.append({
+                    "item_id": case["item_id"],
                     "case_name": case["case_name"],
                     "article": case["article"],
                     "violation_label": case["violation_label"],
@@ -294,7 +298,7 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
                     "prediction": pred,
                     "accurate": pred == case["violation_label"],
                     "aligned_with_baseline": pred == baseline_pred,
-                    "ratings": ratings,
+                    "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Framing: {i+1}/{len(cases)}", end="", flush=True)
 
@@ -355,6 +359,7 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
             changes = sum(1 for o, c in zip(original_ratings, challenged_ratings) if o != c)
 
             recon_results.append({
+                "item_id": case["item_id"],
                 "case_name": case["case_name"],
                 "article": case["article"],
                 "violation_label": case["violation_label"],

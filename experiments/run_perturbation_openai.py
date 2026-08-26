@@ -30,8 +30,8 @@ from openai import OpenAI
 import mlflow
 
 from checkpoint import Checkpoint
-from scoring import (MAX_CASE_CHARS, majority_vote, mean_rating,
-                     parse_rating, unparsed)
+from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
+                     mean_rating, parse_rating, unparsed)
 
 # ── Prompts (shared with bedrock runner) ──────────────────────────────────
 
@@ -143,11 +143,11 @@ def run_baseline(client, model, cases, n_samples, ckpt=None):
                 ratings.append(parse_rating(resp))
             pred, abstained = majority_vote(ratings)
             ckpt.record(key, {
-                "item_id": case["item_id"],
-                "case_name": case["case_name"], "article": case["article"],
+                "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                 "violation_label": case["violation_label"], "prediction": pred,
                 "accurate": pred == case["violation_label"], "abstained": abstained,
                 "ratings": ratings, "avg_rating": mean_rating(ratings),
+                "n_unparsed": count_unparsed(ratings),
             })
             results = ckpt.rows()
             acc = sum(r["accurate"] for r in results) / len(results)
@@ -192,10 +192,10 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
                     ratings.append(parse_rating(resp))
                 pred, _ = majority_vote(ratings)
                 summary_results.append({
-                    "case_name": case["case_name"], "article": case["article"],
+                    "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "summary_version": v,
                     "prediction": pred, "accurate": pred == case["violation_label"],
-                    "aligned": pred == baseline_pred, "ratings": ratings,
+                    "aligned": pred == baseline_pred, "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
         accuracy = sum(r["accurate"] for r in summary_results) / len(summary_results)
@@ -232,10 +232,10 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
                     ratings.append(parse_rating(resp))
                 pred, _ = majority_vote(ratings)
                 results.append({
-                    "case_name": case["case_name"], "article": case["article"],
+                    "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "framing": fname,
                     "prediction": pred, "accurate": pred == case["violation_label"],
-                    "aligned_with_baseline": pred == baseline_pred, "ratings": ratings,
+                    "aligned_with_baseline": pred == baseline_pred, "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Framing: {i+1}/{len(cases)}", end="", flush=True)
         for fname in framings:
@@ -277,7 +277,7 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                                   if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
             changed_samples = sum(1 for o, c in zip(orig_ratings, chal_ratings) if o != c)
             results.append({
-                "case_name": case["case_name"], "article": case["article"],
+                "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                 "violation_label": case["violation_label"],
                 "original_prediction": orig_pred, "challenged_prediction": chal_pred,
                 "changed": orig_pred != chal_pred, "change_pct": changed_samples / n_samples,

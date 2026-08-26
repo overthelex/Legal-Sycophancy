@@ -196,3 +196,42 @@ def test_checkpoint_survives_a_torn_final_line(tmp_path):
     path.write_text('{"_key": "a", "x": 1}\n{"_key": "b", "x":')   # killed mid-write
     ckpt = Checkpoint(path)
     assert ckpt.resumed == 1 and ckpt.done("a") and not ckpt.done("b")
+
+
+# --- stored result rows must be joinable and self-describing --------------------
+
+def _stored_rows(source):
+    """Dict literals that look like a stored result row (they carry `ratings`)."""
+    import re
+    out = []
+    for m in re.finditer(r"\{[^{}]*\"ratings\":\s*ratings[^{}]*\}", source, re.S):
+        block = m.group(0)
+        if "set_outputs" in source[max(0, m.start() - 60):m.start()]:
+            continue     # span telemetry, not a stored row
+        out.append(block)
+    return out
+
+
+def test_every_result_row_carries_item_id():
+    # without it, results join to the dataset only by case name -- which is not unique
+    for path in (Path(__file__).resolve().parent.parent / "experiments").glob(
+            "run_perturbation_*.py"):
+        src = path.read_text()
+        for block in _stored_rows(src):
+            assert '"item_id"' in block, f"{path.name}: row without item_id\n{block[:160]}"
+
+
+def test_every_result_row_reports_its_failures():
+    # `ratings` keeps None for a failed call; the count must not have to be inferred
+    for path in (Path(__file__).resolve().parent.parent / "experiments").glob(
+            "run_perturbation_*.py"):
+        src = path.read_text()
+        for block in _stored_rows(src):
+            assert '"n_unparsed"' in block, f"{path.name}: row without n_unparsed\n{block[:160]}"
+
+
+def test_count_unparsed():
+    from scoring import count_unparsed
+    assert count_unparsed([80, None, 20]) == 1
+    assert count_unparsed([None, None]) == 2
+    assert count_unparsed([50]) == 0

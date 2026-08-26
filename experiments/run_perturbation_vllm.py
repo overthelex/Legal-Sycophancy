@@ -10,8 +10,8 @@ from run_perturbation_bedrock import (
     SYSTEM_PROMPT, ARTICLE_TITLES, PREDICTIVE_TEMPLATE, NORMATIVE_TEMPLATE,
     FACTUAL_TEMPLATE, SUMMARY_TEMPLATE, RECONSIDERATION_PROMPT,
 )
-from scoring import (MAX_CASE_CHARS, majority_vote, mean_rating,
-                     parse_rating, unparsed)
+from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
+                     mean_rating, parse_rating, unparsed)
 
 
 def call_vllm(client, model, system, user, temperature=1.0, max_tokens=100):
@@ -51,10 +51,11 @@ def run_baseline(client, model, cases, n_samples):
             prompt = PREDICTIVE_TEMPLATE.format(case_text=text, article=case["article"], article_title=at)
             ratings = [parse_rating(call_vllm(client, model, SYSTEM_PROMPT, prompt)) for _ in range(n_samples)]
             pred, abstained = majority_vote(ratings)
-            results.append({"case_name": case["case_name"], "article": case["article"],
+            results.append({"item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                 "violation_label": case["violation_label"], "prediction": pred,
                 "accurate": pred == case["violation_label"], "abstained": abstained,
-                "ratings": ratings, "avg_rating": mean_rating(ratings)})
+                "ratings": ratings, "avg_rating": mean_rating(ratings),
+                "n_unparsed": count_unparsed(ratings)})
             print(f"\r  Baseline: {i+1}/{len(cases)} | acc={sum(r['accurate'] for r in results)/len(results):.2f}", end="", flush=True)
         accuracy = sum(r["accurate"] for r in results) / len(results)
         abstention = sum(r["abstained"] for r in results) / len(results)
@@ -85,9 +86,9 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
                 prompt = PREDICTIVE_TEMPLATE.format(case_text=summaries[key][v], article=case["article"], article_title=at)
                 ratings = [parse_rating(call_vllm(client, model, SYSTEM_PROMPT, prompt)) for _ in range(n_samples)]
                 pred, _ = majority_vote(ratings)
-                results.append({"case_name": case["case_name"], "article": case["article"],
+                results.append({"item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "summary_version": v,
-                    "prediction": pred, "accurate": pred==case["violation_label"], "aligned": pred==bp, "ratings": ratings})
+                    "prediction": pred, "accurate": pred==case["violation_label"], "aligned": pred==bp, "ratings": ratings, "n_unparsed": count_unparsed(ratings)})
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
         accuracy = sum(r["accurate"] for r in results) / len(results)
         alignment = sum(r["aligned"] for r in results) / len(results)
@@ -116,7 +117,7 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
             case_label = f"{case['case_name'][:40]}|Art{case['article']}"
 
             with mlflow.start_span(name=f"framing|{case_label}") as case_span:
-                case_span.set_attributes({"case_name": case["case_name"], "article": case["article"],
+                case_span.set_attributes({"item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "baseline_prediction": str(bp)})
                 framing_preds = {}
                 for fname, tmpl in framings.items():
@@ -129,9 +130,9 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
                         framing_preds[fname] = pred
                         fs.set_outputs({"prediction": pred, "ratings": ratings,
                             "accurate": pred==case["violation_label"], "aligned": pred==bp})
-                    results.append({"case_name": case["case_name"], "article": case["article"],
+                    results.append({"item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                         "violation_label": case["violation_label"], "framing": fname,
-                        "prediction": pred, "accurate": pred==case["violation_label"], "aligned_with_baseline": pred==bp, "ratings": ratings})
+                        "prediction": pred, "accurate": pred==case["violation_label"], "aligned_with_baseline": pred==bp, "ratings": ratings, "n_unparsed": count_unparsed(ratings)})
                 case_span.set_outputs({"predictions": framing_preds, "any_disagreement": len(set(framing_preds.values()))>1})
             print(f"\r  Framing: {i+1}/{len(cases)}", end="", flush=True)
         for fn in framings:
@@ -158,7 +159,7 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
             orig, chal = [], []
 
             with mlflow.start_span(name=f"recon|{case_label}") as case_span:
-                case_span.set_attributes({"case_name": case["case_name"], "article": case["article"],
+                case_span.set_attributes({"item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"]})
                 for s in range(n_samples):
                     with mlflow.start_span(name=f"sample_{s}") as ss:
@@ -178,7 +179,7 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                 changes = sum(1 for o,c in zip(orig,chal) if o!=c)
                 case_span.set_outputs({"original_prediction": op, "challenged_prediction": cp,
                     "prediction_changed": op!=cp, "individual_change_rate": changes/n_samples})
-            results.append({"case_name": case["case_name"], "article": case["article"],
+            results.append({"item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                 "violation_label": case["violation_label"], "original_prediction": op,
                 "challenged_prediction": cp, "original_accurate": op==case["violation_label"],
                 "challenged_accurate": cp==case["violation_label"], "prediction_changed": op!=cp,
