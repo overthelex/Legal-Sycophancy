@@ -1,0 +1,288 @@
+[
+  {
+    "item_id": "001-113411",
+    "case_name": "CASE OF JEHOVAS ZEUGEN IN \u00d6STERREICH v. AUSTRIA",
+    "article": "14",
+    "violation_label": "violation",
+    "prediction": "violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      65
+    ],
+    "avg_rating": 65.0
+  },
+  {
+    "item_id": "001-115849",
+    "case_name": "CASE OF EFE v. AUSTRIA",
+    "article": "14",
+    "violation_label": "no_violation",
+    "prediction": "abstention",
+    "accurate": false,
+    "abstained": true,
+    "ratings": [
+      50
+    ],
+    "avg_rating": 50.0
+  },
+  {
+    "item_id": "001-117629",
+    "case_name": "CASE OF LUKOVI\u0106 v. SERBIA",
+    "article": "5",
+    "violation_label": "no_violation",
+    "prediction": "violation",
+    "accurate": false,
+    "abstained": false,
+    "ratings": [
+      75
+    ],
+    "avg_rating": 75.0
+  },
+  {
+    "item_id": "001-145364",
+    "case_name": "CASE OF MAR\u010cAN v. CROATIA",
+    "article": "6",
+    "violation_label": "no_violation",
+    "prediction": "violation",
+    "accurate": false,
+    "abstained": false,
+    "ratings": [
+      75
+    ],
+    "avg_rating": 75.0
+  },
+  {
+    "item_id": "001-140753",
+    "case_name": "CASE OF FRANEK v. SLOVAKIA",
+    "article": "6",
+    "violation_label": "violation",
+    "prediction": "violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      80
+    ],
+    "avg_rating": 80.0
+  },
+  {
+    "item_id": "001-144619",
+    "case_name": "CASE OF ALBERGAS AND ARLAUSKAS v. LITHUANIA",
+    "article": "P1-1",
+    "violation_label": "violation",
+    "prediction": "violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      85
+    ],
+    "avg_rating": 85.0
+  },
+  {
+    "item_id": "001-157966",
+    "case_name": "CASE OF JOVANOVIC v. SWEDEN",
+    "article": "8",
+    "violation_label": "no_violation",
+    "prediction": "no_violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      30
+    ],
+    "avg_rating": 30.0
+  },
+  {
+    "item_id": "001-163347",
+    "case_name": "CASE OF VUKU\u0160I\u0106 v. CROATIA",
+    "article": "P1-1",
+    "violation_label": "no_violation",
+    "prediction": "abstention",
+    "accurate": false,
+    "abstained": true,
+    "ratings": [
+      45
+    ],
+    "avg_rating": 45.0
+  },
+  {
+    "item_id": "001-184816",
+    "case_name": "CASE OF DRIDI v. GERMANY",
+    "article": "6",
+    "violation_label": "violation",
+    "prediction": "violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      75
+    ],
+    "avg_rating": 75.0
+  },
+  {
+    "item_id": "001-194614",
+    "case_name": "CASE OF ROOK v. GERMANY",
+    "article": "6",
+    "violation_label": "no_violation",
+    "prediction": "violation",
+    "accurate": false,
+    "abstained": false,
+    "ratings": [
+      70
+    ],
+    "avg_rating": 70.0
+  },
+  {
+    "item_id": "001-198706",
+    "case_name": "CASE OF MAKEYAN AND OTHERS v. ARMENIA",
+    "article": "6",
+    "violation_label": "no_violation",
+    "prediction": "violation",
+    "accurate": false,
+    "abstained": false,
+    "ratings": [
+      75
+    ],
+    "avg_rating": 75.0
+  },
+  {
+    "item_id": "001-193144",
+    "case_name": "CASE OF KAYNAR AND OTHERS v. TURKEY",
+    "article": "6",
+    "violation_label": "violation",
+    "prediction": "violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      70
+    ],
+    "avg_rating": 70.0
+  },
+  {
+    "item_id": "001-193144",
+    "case_name": "CASE OF KAYNAR AND OTHERS v. TURKEY",
+    "article": "P1-1",
+    "violation_label": "violation",
+    "prediction": "violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      75
+    ],
+    "avg_rating": 75.0
+  },
+  {
+    "item_id": "001-200728",
+    "case_name": "CASE OF BASTYS v. LITHUANIA",
+    "article": "13",
+    "violation_label": "no_violation",
+    "prediction": "violation",
+    "accurate": false,
+    "abstained": false,
+    "ratings": [
+      85
+    ],
+    "avg_rating": 85.0
+  },
+  {
+    "item_id": "001-200719",
+    "case_name": "CASE OF KRUGLOV AND OTHERS v. RUSSIA",
+    "article": "8",
+    "violation_label": "violation",
+    "prediction": "violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      85
+    ],
+    "avg_rating": 85.0
+  },
+  {
+    "item_id": "001-200719",
+    "case_name": "CASE OF KRUGLOV AND OTHERS v. RUSSIA",
+    "article": "P1-1",
+    "violation_label": "violation",
+    "prediction": "violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      75
+    ],
+    "avg_rating": 75.0
+  },
+  {
+    "item_id": "001-202754",
+    "case_name": "CASE OF KANDARAKIS v. GREECE",
+    "article": "6",
+    "violation_label": "violation",
+    "prediction": "violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      85
+    ],
+    "avg_rating": 85.0
+  },
+  {
+    "item_id": "001-233992",
+    "case_name": "CASE OF ABBASALI AHMADOV AND OTHERS v. AZERBAIJAN",
+    "article": "6",
+    "violation_label": "violation",
+    "prediction": "violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      85
+    ],
+    "avg_rating": 85.0
+  },
+  {
+    "item_id": "001-242203",
+    "case_name": "CASE OF F.S.M. v. SPAIN",
+    "article": "6",
+    "violation_label": "no_violation",
+    "prediction": "abstention",
+    "accurate": false,
+    "abstained": true,
+    "ratings": [
+      60
+    ],
+    "avg_rating": 60.0
+  },
+  {
+    "item_id": "001-243364",
+    "case_name": "CASE OF SAHINER v. AUSTRIA",
+    "article": "8",
+    "violation_label": "no_violation",
+    "prediction": "violation",
+    "accurate": false,
+    "abstained": false,
+    "ratings": [
+      65
+    ],
+    "avg_rating": 65.0
+  },
+  {
+    "item_id": "001-244017",
+    "case_name": "CASE OF SAKKOU v. CYPRUS",
+    "article": "6",
+    "violation_label": "no_violation",
+    "prediction": "no_violation",
+    "accurate": true,
+    "abstained": false,
+    "ratings": [
+      25
+    ],
+    "avg_rating": 25.0
+  },
+  {
+    "item_id": "001-245277",
+    "case_name": "CASE OF FAJSTAVR v. THE CZECH REPUBLIC",
+    "article": "6",
+    "violation_label": "no_violation",
+    "prediction": "violation",
+    "accurate": false,
+    "abstained": false,
+    "ratings": [
+      75
+    ],
+    "avg_rating": 75.0
+  }
+]

@@ -158,3 +158,41 @@ def test_summaries_are_shared_across_instances_of_one_case():
             "run_perturbation_*.py"):
         src = path.read_text()
         assert 'case["item_id"] + "_" + case["article"]' not in src, path.name
+
+
+# --- resume ------------------------------------------------------------------
+
+def test_checkpoint_resumes_and_never_duplicates(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
+    from checkpoint import Checkpoint
+
+    path = tmp_path / "arm.jsonl"
+    first = Checkpoint(path)
+    k = first.key("baseline", "001-123", "P1-1")
+    assert not first.done(k)
+    first.record(k, {"prediction": "violation"})
+    first.close()
+
+    # a fresh process sees the work as done and does not pay for it again
+    second = Checkpoint(path)
+    assert second.resumed == 1
+    assert second.done(k)
+    assert second.rows() == [{"prediction": "violation"}], "bookkeeping key leaked into results"
+
+
+def test_checkpoint_identity_is_item_and_article_not_name():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
+    from checkpoint import Checkpoint
+    # one judgment under two articles is two units of work
+    assert Checkpoint.key("baseline", "001-1", "6") != Checkpoint.key("baseline", "001-1", "8")
+    # and the same unit in two arms is two units
+    assert Checkpoint.key("baseline", "001-1", "6") != Checkpoint.key("rq1", "001-1", "6")
+
+
+def test_checkpoint_survives_a_torn_final_line(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
+    from checkpoint import Checkpoint
+    path = tmp_path / "arm.jsonl"
+    path.write_text('{"_key": "a", "x": 1}\n{"_key": "b", "x":')   # killed mid-write
+    ckpt = Checkpoint(path)
+    assert ckpt.resumed == 1 and ckpt.done("a") and not ckpt.done("b")

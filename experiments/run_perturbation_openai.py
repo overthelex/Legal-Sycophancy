@@ -29,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 import mlflow
 
+from checkpoint import Checkpoint
 from scoring import (MAX_CASE_CHARS, majority_vote, mean_rating,
                      parse_rating, unparsed)
 
@@ -122,12 +123,17 @@ def call_openai_multiturn(client, model, system, messages, temperature=1.0, max_
 
 # ── Experiments ──────────────────────────────────────────────────────────
 
-def run_baseline(client, model, cases, n_samples):
-    results = []
+def run_baseline(client, model, cases, n_samples, ckpt=None):
+    ckpt = ckpt or Checkpoint(None, enabled=False)
     with mlflow.start_run(run_name="baseline", nested=True):
         mlflow.log_param("stage", "baseline")
         mlflow.log_param("n_cases", len(cases))
+        if ckpt.resumed:
+            print(f"  Baseline: resuming, {ckpt.resumed} already recorded")
         for i, case in enumerate(cases):
+            key = ckpt.key("baseline", case["item_id"], case["article"])
+            if ckpt.done(key):
+                continue
             text = case.get("full_case_text_no_verdict", case.get("verdict_free_text", ""))[:MAX_CASE_CHARS]
             article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
             prompt = PREDICTIVE_TEMPLATE.format(case_text=text, article=case["article"], article_title=article_title)
@@ -136,14 +142,17 @@ def run_baseline(client, model, cases, n_samples):
                 resp = call_openai(client, model, SYSTEM_PROMPT, prompt)
                 ratings.append(parse_rating(resp))
             pred, abstained = majority_vote(ratings)
-            results.append({
+            ckpt.record(key, {
+                "item_id": case["item_id"],
                 "case_name": case["case_name"], "article": case["article"],
                 "violation_label": case["violation_label"], "prediction": pred,
                 "accurate": pred == case["violation_label"], "abstained": abstained,
                 "ratings": ratings, "avg_rating": mean_rating(ratings),
             })
+            results = ckpt.rows()
             acc = sum(r["accurate"] for r in results) / len(results)
             print(f"\r  Baseline: {i+1}/{len(cases)} | acc={acc:.2f}", end="", flush=True)
+        results = ckpt.rows()
         accuracy = sum(r["accurate"] for r in results) / len(results)
         abstention = sum(r["abstained"] for r in results) / len(results)
         mlflow.log_metric("accuracy", accuracy)
@@ -293,6 +302,8 @@ def main():
     parser.add_argument("--samples", type=int, default=5, help="Samples per case (default 5)")
     parser.add_argument("--rq", choices=["baseline", "rq1", "rq2", "rq3", "all"], default="all")
     parser.add_argument("--output-dir", default="data/experiments/full_scale")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="ignore any checkpoint and score every case again")
     args = parser.parse_args()
 
     api_key = os.environ.get(args.api_key_env, "")
@@ -314,7 +325,7 @@ def main():
     print(f"API: {args.base_url}")
     print()
 
-    mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://10.88.0.4:5000"))
+    mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "https://mlflow.lex"))
     mlflow.set_experiment("full_scale_perturbation")
 
     model_key = args.model.replace("/", "_").replace(".", "_")
@@ -332,7 +343,10 @@ def main():
         summaries = None
 
         if "baseline" in rqs:
-            baseline_results = run_baseline(client, args.model, cases, args.samples)
+            ckpt = Checkpoint(f"{args.output_dir}/{model_key}/baseline.jsonl",
+                              enabled=not args.no_resume)
+            baseline_results = run_baseline(client, args.model, cases, args.samples, ckpt)
+            ckpt.close()
             with open(f"{args.output_dir}/{model_key}/baseline_results.json", "w") as f:
                 json.dump(baseline_results, f, indent=2)
 

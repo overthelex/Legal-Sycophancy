@@ -335,7 +335,7 @@ def main():
     parser.add_argument("--cases", required=True)
     parser.add_argument("--model", default="qwen.qwen3-32b-v1:0")
     parser.add_argument("--region", default="us-east-1")
-    parser.add_argument("--mlflow-url", default="http://10.88.0.4:5000")
+    parser.add_argument("--mlflow-url", default="https://mlflow.lex")
     parser.add_argument("--experiment-id", default="23")
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--stages", default="all")

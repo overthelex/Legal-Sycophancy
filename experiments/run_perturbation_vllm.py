@@ -200,7 +200,7 @@ def main():
     parser.add_argument("--cases", required=True)
     parser.add_argument("--vllm-url", default="http://10.88.0.3:8000/v1")
     parser.add_argument("--model", default="meta-llama/Llama-3.3-70B-Instruct")
-    parser.add_argument("--mlflow-url", default="http://10.88.0.4:5000")
+    parser.add_argument("--mlflow-url", default="https://mlflow.lex")
     parser.add_argument("--experiment-id", default="23")
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--stages", default="all")
