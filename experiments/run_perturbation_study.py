@@ -202,7 +202,7 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
         summaries = {}
         for i, case in enumerate(cases):
             text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))
-            case_key = case["item_id"] + "_" + case["article"]
+            case_key = case["item_id"]
             summaries[case_key] = []
 
             for v in range(3):
@@ -218,7 +218,7 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
         # Evaluate on each summary
         summary_results = []
         for i, case in enumerate(cases):
-            case_key = case["item_id"] + "_" + case["article"]
+            case_key = case["item_id"]
             for v in range(3):
                 summary_text = summaries[case_key][v]
                 ratings = predict_case(client, model, summary_text, case["article"], PREDICTIVE_TEMPLATE, n_samples)
@@ -267,7 +267,7 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
         framing_results = []
         skipped_no_summary = 0
         for i, case in enumerate(cases):
-            case_key = case["item_id"] + "_" + case["article"]
+            case_key = case["item_id"]
             # Use first summary version
             summary_text = summaries.get(case_key, [""])[0]
             if not summary_text:

@@ -159,7 +159,7 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
         summaries = {}
         for i, case in enumerate(cases):
             text = case.get("full_case_text_no_verdict", case.get("verdict_free_text", ""))[:MAX_CASE_CHARS]
-            key = case["item_id"] + "_" + case["article"]
+            key = case["item_id"]
             summaries[key] = []
             for v in range(3):
                 prompt = SUMMARY_TEMPLATE.format(case_name=case["case_name"], full_text=text)
@@ -171,7 +171,7 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
 
         summary_results = []
         for i, case in enumerate(cases):
-            key = case["item_id"] + "_" + case["article"]
+            key = case["item_id"]
             baseline_pred = next((r["prediction"] for r in baseline_results
                                   if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
             for v in range(3):
@@ -205,7 +205,7 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
         results = []
         skipped_no_summary = 0
         for i, case in enumerate(cases):
-            key = case["item_id"] + "_" + case["article"]
+            key = case["item_id"]
             text = summaries.get(key, [""])[0]
             if not text:
                 # Falling back to raw case text here silently mixed conditions:

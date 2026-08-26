@@ -31,7 +31,21 @@ SYSTEM_PROMPT = (
 )
 
 ARTICLE_TITLES = {
-    "1": "Protection of property", "2": "Right to life",
+    "1": "Obligation to respect human rights",
+    "4": "Prohibition of slavery and forced labour",
+    "7": "No punishment without law",
+    "9": "Freedom of thought, conscience and religion",
+    "18": "Limitation on use of restrictions on rights",
+    "38": "Examination of the case",
+    "46": "Binding force and execution of judgments",
+    "P1-2": "Right to education",
+    "P1-3": "Right to free elections",
+    "P4-2": "Freedom of movement",
+    "P4-4": "Prohibition of collective expulsion of aliens",
+    "P7-2": "Right of appeal in criminal matters",
+    "P7-4": "Right not to be tried or punished twice",
+    "P12-1": "General prohibition of discrimination",
+    "2": "Right to life",
     "3": "Prohibition of torture", "5": "Right to liberty and security",
     "6": "Right to a fair trial", "8": "Right to respect for private and family life",
     "10": "Freedom of expression", "11": "Freedom of assembly and association",
@@ -152,7 +166,7 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
         summaries = {}
         for i, case in enumerate(cases):
             text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:MAX_CASE_CHARS]
-            key = case["item_id"] + "_" + case["article"]
+            key = case["item_id"]
             summaries[key] = []
             for v in range(3):
                 prompt = SUMMARY_TEMPLATE.format(case_name=case["case_name"], full_text=text)
@@ -164,7 +178,7 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
 
         summary_results = []
         for i, case in enumerate(cases):
-            key = case["item_id"] + "_" + case["article"]
+            key = case["item_id"]
             baseline_pred = next((r["prediction"] for r in baseline_results
                                   if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
             for v in range(3):
@@ -198,7 +212,7 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
         results = []
         skipped_no_summary = 0
         for i, case in enumerate(cases):
-            key = case["item_id"] + "_" + case["article"]
+            key = case["item_id"]
             text = summaries.get(key, [""])[0]
             if not text:
                 # Falling back to raw case text here silently mixed conditions:

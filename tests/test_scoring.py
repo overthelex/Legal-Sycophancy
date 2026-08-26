@@ -122,3 +122,39 @@ def test_no_runner_averages_raw_ratings():
             "run_perturbation_*.py"):
         source = path.read_text().replace(" ", "")
         assert "sum(ratings)/len(ratings)" not in source, path.name
+
+
+# --- the runners must agree with the published set -----------------------------
+
+def test_article_titles_cover_the_published_codes():
+    # a code without a title renders as "Article 7 - Article 7" in the prompt
+    import re
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
+    src = (Path(__file__).resolve().parent.parent
+           / "experiments" / "run_perturbation_bedrock.py").read_text()
+    titles = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"',
+                             re.search(r"ARTICLE_TITLES\s*=\s*\{(.*?)\n\}", src, re.S).group(1)))
+    published = {"2", "3", "5", "6", "8", "10", "11", "13", "14", "34", "38", "41",
+                 "4", "7", "9", "18", "P1-1", "P1-2", "P1-3", "P4-2", "P4-4",
+                 "P7-2", "P7-4", "P12-1"}
+    assert not published - set(titles), f"no title for {published - set(titles)}"
+
+
+def test_convention_article_1_is_not_the_protocol_right():
+    # the legacy lossy field collapses P1-1 to "1"; the title map must not repeat that
+    import re
+    src = (Path(__file__).resolve().parent.parent
+           / "experiments" / "run_perturbation_bedrock.py").read_text()
+    titles = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"',
+                             re.search(r"ARTICLE_TITLES\s*=\s*\{(.*?)\n\}", src, re.S).group(1)))
+    assert titles["P1-1"] == "Protection of property"
+    assert titles["1"] != titles["P1-1"], "Convention Article 1 is not Article 1 of Protocol 1"
+
+
+def test_summaries_are_shared_across_instances_of_one_case():
+    # the summary prompt takes only the case text, so keying the cache on the article
+    # would give two instances of one judgment two different summaries -- and bill twice
+    for path in (Path(__file__).resolve().parent.parent / "experiments").glob(
+            "run_perturbation_*.py"):
+        src = path.read_text()
+        assert 'case["item_id"] + "_" + case["article"]' not in src, path.name

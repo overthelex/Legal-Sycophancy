@@ -71,14 +71,14 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
         summaries = {}
         for i, case in enumerate(cases):
             text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:MAX_CASE_CHARS]
-            key = case["item_id"] + "_" + case["article"]
+            key = case["item_id"]
             summaries[key] = [call_vllm(client, model, "", SUMMARY_TEMPLATE.format(case_name=case["case_name"], full_text=text), temperature=1.0, max_tokens=1000) for _ in range(3)]
             print(f"\r  Summaries: {i+1}/{len(cases)}", end="", flush=True)
         print()
         mlflow.log_dict(summaries, "summaries.json")
         results = []
         for i, case in enumerate(cases):
-            key = case["item_id"] + "_" + case["article"]
+            key = case["item_id"]
             bp = next((r["prediction"] for r in baseline_results if r["case_name"]==case["case_name"] and r["article"]==case["article"]), None)
             for v in range(3):
                 at = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
@@ -105,7 +105,7 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
         results = []
         skipped_no_summary = 0
         for i, case in enumerate(cases):
-            key = case["item_id"] + "_" + case["article"]
+            key = case["item_id"]
             text = summaries.get(key, [""])[0]
             if not text:
                 # Falling back to raw case text here silently mixed conditions:
