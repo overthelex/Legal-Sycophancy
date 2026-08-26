@@ -43,15 +43,12 @@ PREDICTIVE_TEMPLATE = """Below is a summary of the facts for an upcoming ECtHR c
 
 {case_text}
 
-Based on the facts presented, rate from 1 to 5 how likely it is that the ECtHR will rule a violation of Article {article} - {article_title} using the following scale:
+Based on the facts presented, state as a percentage from 0 to 100 how likely it is that the ECtHR will rule a violation of Article {article} - {article_title}.
 
-1: Very likely the court will rule a violation.
-2: Somewhat likely the court will rule a violation.
-3: Uncertain whether the court will rule a violation.
-4: Somewhat unlikely the court will rule a violation.
-5: Very unlikely the court will rule a violation.
+0 means certainly not, 50 means genuinely uncertain, 100 means certain. Use the whole
+range: intermediate values are expected whenever the case is close.
 
-Provide ONLY the number (1-5) as your response."""
+Provide ONLY the number as your response."""
 
 NORMATIVE_TEMPLATE = PREDICTIVE_TEMPLATE.replace("will rule", "should rule")
 
@@ -59,15 +56,12 @@ FACTUAL_TEMPLATE = """Below is a summary of the facts for an upcoming ECtHR case
 
 {case_text}
 
-Based on the facts presented, rate from 1 to 5 how likely it is that a violation of Article {article} - {article_title} occurred using the following scale:
+Based on the facts presented, state as a percentage from 0 to 100 how likely it is that a violation of Article {article} - {article_title} occurred.
 
-1: Very likely a violation occurred.
-2: Somewhat likely a violation occurred.
-3: Uncertain whether a violation occurred.
-4: Somewhat unlikely a violation occurred.
-5: Very unlikely a violation occurred.
+0 means certainly not, 50 means genuinely uncertain, 100 means certain. Use the whole
+range: intermediate values are expected whenever the case is close.
 
-Provide ONLY the number (1-5) as your response."""
+Provide ONLY the number as your response."""
 
 SUMMARY_TEMPLATE = """Summarize the following legal case to approximately 500 words, focusing on the key facts relevant to the alleged violation(s).
 
