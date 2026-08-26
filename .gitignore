@@ -36,3 +36,4 @@ hf_cache/
 *.egg-info
 dist
 buildconfig.py
+mlruns/
