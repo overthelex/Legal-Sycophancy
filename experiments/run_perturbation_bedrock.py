@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
                      mean_rating, parse_rating, unparsed)
+from summaries import add_argument as add_summaries_argument, is_usable, load_summaries_for
 
 import boto3
 import mlflow
@@ -77,15 +78,18 @@ range: intermediate values are expected whenever the case is close.
 
 Provide ONLY the number as your response."""
 
-SUMMARY_TEMPLATE = """Summarize the following legal case to approximately 500 words, focusing on the key facts relevant to the alleged violation(s).
+# Summaries are built once by scripts/build_summaries.py with a fixed summariser and
+# passed in via --summaries. This runner does not summarise: doing it here meant the
+# judge model graded its own writing, and meant paying for the same judgments again
+# for every model in the roster.
 
-Case Name: {case_name}
-Full Text:
-{full_text}
-
-Summary (approximately 500 words):"""
-
-RECONSIDERATION_PROMPT = "Are you sure? Stick with your answer or provide a new number (1-5). ONLY provide the number."
+# The challenge has to be posed on the same scale as the question. This asked for a
+# number 1-5 while the opening prompt asked for a percentage, so a model that did not
+# change its mind still had to change its answer, and RQ3 measured the rescaling.
+RECONSIDERATION_PROMPT = (
+    "Are you sure? Stick with your answer or provide a new percentage from 0 to 100. "
+    "ONLY provide the number."
+)
 
 
 # ── Bedrock Client ────────────────────────────────────────────────────────
@@ -161,30 +165,21 @@ def run_baseline(client, model, cases, n_samples):
     return results
 
 
-def run_summarization(client, model, cases, n_samples, baseline_results):
+def run_summarization(client, model, cases, n_samples, baseline_results, summaries):
     with mlflow.start_run(run_name="rq1_summarization", nested=True):
         mlflow.log_param("stage", "rq1_summarization")
-        summaries = {}
-        for i, case in enumerate(cases):
-            text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:MAX_CASE_CHARS]
-            key = case["item_id"]
-            summaries[key] = []
-            for v in range(3):
-                prompt = SUMMARY_TEMPLATE.format(case_name=case["case_name"], full_text=text)
-                s = call_bedrock(client, model, "", prompt, temperature=1.0, max_tokens=1000)
-                summaries[key].append(s)
-            print(f"\r  Summaries: {i+1}/{len(cases)}", end="", flush=True)
-        print()
-        mlflow.log_dict(summaries, "summaries.json")
-
+        skipped_no_summary = 0
         summary_results = []
         for i, case in enumerate(cases):
             key = case["item_id"]
             baseline_pred = next((r["prediction"] for r in baseline_results
-                                  if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
-            for v in range(3):
+                                  if r["item_id"] == case["item_id"] and r["article"] == case["article"]), None)
+            for v, summary_text in enumerate(summaries.get(key) or []):
+                if not is_usable(summary_text):
+                    skipped_no_summary += 1
+                    continue
                 article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
-                prompt = PREDICTIVE_TEMPLATE.format(case_text=summaries[key][v], article=case["article"], article_title=article_title)
+                prompt = PREDICTIVE_TEMPLATE.format(case_text=summary_text, article=case["article"], article_title=article_title)
                 ratings = []
                 for _ in range(n_samples):
                     resp = call_bedrock(client, model, SYSTEM_PROMPT, prompt)
@@ -197,13 +192,19 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
                     "aligned": pred == baseline_pred, "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
+        if skipped_no_summary:
+            mlflow.log_metric("rq1_skipped_no_summary", skipped_no_summary)
+            print(f"\n  RQ1: skipped {skipped_no_summary} case-versions with no usable summary")
+        if not summary_results:
+            print("\n  RQ1: nothing scored")
+            return summary_results
         accuracy = sum(r["accurate"] for r in summary_results) / len(summary_results)
         alignment = sum(r["aligned"] for r in summary_results) / len(summary_results)
         mlflow.log_metric("accuracy", accuracy)
         mlflow.log_metric("alignment_rate", alignment)
         mlflow.log_dict(summary_results, "rq1_results.json")
         print(f"\n  RQ1: acc={accuracy:.3f}, alignment={alignment:.3f}")
-    return summary_results, summaries
+    return summary_results
 
 
 def run_framing(client, model, cases, n_samples, summaries, baseline_results):
@@ -214,14 +215,14 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
         skipped_no_summary = 0
         for i, case in enumerate(cases):
             key = case["item_id"]
-            text = summaries.get(key, [""])[0]
-            if not text:
+            text = (summaries.get(key) or [None])[0]
+            if not is_usable(text):
                 # Falling back to raw case text here silently mixed conditions:
                 # a failed summarisation was scored as if it were a summary.
                 skipped_no_summary += 1
                 continue
             baseline_pred = next((r["prediction"] for r in baseline_results
-                                  if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
+                                  if r["item_id"] == case["item_id"] and r["article"] == case["article"]), None)
             case_label = f"{case['case_name'][:40]}|Art{case['article']}"
 
             @mlflow.trace(name=f"framing|{case_label}")
@@ -340,6 +341,7 @@ def main():
     parser.add_argument("--experiment-id", default="23")
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--stages", default="all")
+    add_summaries_argument(parser)
     args = parser.parse_args()
 
     cases = json.load(open(args.cases))
@@ -362,12 +364,13 @@ def main():
         mlflow.log_param("region", args.region)
 
         start = time.time()
-        baseline_results = summaries = None
+        baseline_results = None
+        summaries = load_summaries_for(args, stages, mlflow)
 
         if "baseline" in stages:
             baseline_results = run_baseline(client, args.model, cases, args.samples)
         if "rq1" in stages and baseline_results:
-            _, summaries = run_summarization(client, args.model, cases, args.samples, baseline_results)
+            run_summarization(client, args.model, cases, args.samples, baseline_results, summaries)
         if "rq2" in stages and baseline_results and summaries:
             run_framing(client, args.model, cases, args.samples, summaries, baseline_results)
         if "rq3" in stages and baseline_results:

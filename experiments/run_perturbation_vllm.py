@@ -8,10 +8,11 @@ import mlflow, openai
 sys.path.insert(0, os.path.dirname(__file__))
 from run_perturbation_bedrock import (
     SYSTEM_PROMPT, ARTICLE_TITLES, PREDICTIVE_TEMPLATE, NORMATIVE_TEMPLATE,
-    FACTUAL_TEMPLATE, SUMMARY_TEMPLATE, RECONSIDERATION_PROMPT,
+    FACTUAL_TEMPLATE, RECONSIDERATION_PROMPT,
 )
 from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
                      mean_rating, parse_rating, unparsed)
+from summaries import add_argument as add_summaries_argument, is_usable, load_summaries_for
 
 
 def call_vllm(client, model, system, user, temperature=1.0, max_tokens=100):
@@ -66,37 +67,39 @@ def run_baseline(client, model, cases, n_samples):
     return results
 
 
-def run_summarization(client, model, cases, n_samples, baseline_results):
+def run_summarization(client, model, cases, n_samples, baseline_results, summaries):
     with mlflow.start_run(run_name="rq1_summarization", nested=True):
         mlflow.log_param("stage", "rq1_summarization")
-        summaries = {}
-        for i, case in enumerate(cases):
-            text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:MAX_CASE_CHARS]
-            key = case["item_id"]
-            summaries[key] = [call_vllm(client, model, "", SUMMARY_TEMPLATE.format(case_name=case["case_name"], full_text=text), temperature=1.0, max_tokens=1000) for _ in range(3)]
-            print(f"\r  Summaries: {i+1}/{len(cases)}", end="", flush=True)
-        print()
-        mlflow.log_dict(summaries, "summaries.json")
+        skipped_no_summary = 0
         results = []
         for i, case in enumerate(cases):
             key = case["item_id"]
-            bp = next((r["prediction"] for r in baseline_results if r["case_name"]==case["case_name"] and r["article"]==case["article"]), None)
-            for v in range(3):
+            bp = next((r["prediction"] for r in baseline_results if r["item_id"]==case["item_id"] and r["article"]==case["article"]), None)
+            for v, summary_text in enumerate(summaries.get(key) or []):
+                if not is_usable(summary_text):
+                    skipped_no_summary += 1
+                    continue
                 at = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
-                prompt = PREDICTIVE_TEMPLATE.format(case_text=summaries[key][v], article=case["article"], article_title=at)
+                prompt = PREDICTIVE_TEMPLATE.format(case_text=summary_text, article=case["article"], article_title=at)
                 ratings = [parse_rating(call_vllm(client, model, SYSTEM_PROMPT, prompt)) for _ in range(n_samples)]
                 pred, _ = majority_vote(ratings)
                 results.append({"item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "summary_version": v,
                     "prediction": pred, "accurate": pred==case["violation_label"], "aligned": pred==bp, "ratings": ratings, "n_unparsed": count_unparsed(ratings)})
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
+        if skipped_no_summary:
+            mlflow.log_metric("rq1_skipped_no_summary", skipped_no_summary)
+            print(f"\n  RQ1: skipped {skipped_no_summary} case-versions with no usable summary")
+        if not results:
+            print("\n  RQ1: nothing scored")
+            return results
         accuracy = sum(r["accurate"] for r in results) / len(results)
         alignment = sum(r["aligned"] for r in results) / len(results)
         mlflow.log_metric("accuracy", accuracy)
         mlflow.log_metric("alignment_rate", alignment)
         mlflow.log_dict(results, "rq1_results.json")
         print(f"\n  RQ1: acc={accuracy:.3f}, alignment={alignment:.3f}")
-    return results, summaries
+    return results
 
 
 def run_framing(client, model, cases, n_samples, summaries, baseline_results):
@@ -107,13 +110,13 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
         skipped_no_summary = 0
         for i, case in enumerate(cases):
             key = case["item_id"]
-            text = summaries.get(key, [""])[0]
-            if not text:
+            text = (summaries.get(key) or [None])[0]
+            if not is_usable(text):
                 # Falling back to raw case text here silently mixed conditions:
                 # a failed summarisation was scored as if it were a summary.
                 skipped_no_summary += 1
                 continue
-            bp = next((r["prediction"] for r in baseline_results if r["case_name"]==case["case_name"] and r["article"]==case["article"]), None)
+            bp = next((r["prediction"] for r in baseline_results if r["item_id"]==case["item_id"] and r["article"]==case["article"]), None)
             case_label = f"{case['case_name'][:40]}|Art{case['article']}"
 
             with mlflow.start_span(name=f"framing|{case_label}") as case_span:
@@ -205,6 +208,7 @@ def main():
     parser.add_argument("--experiment-id", default="23")
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--stages", default="all")
+    add_summaries_argument(parser)
     args = parser.parse_args()
 
     cases = json.load(open(args.cases))
@@ -226,8 +230,9 @@ def main():
         start = time.time()
         bl = sm = None
         if "baseline" in stages: bl = run_baseline(client, args.model, cases, args.samples)
-        if "rq1" in stages and bl: _, sm = run_summarization(client, args.model, cases, args.samples, bl)
-        if "rq2" in stages and bl and sm: run_framing(client, args.model, cases, args.samples, sm, bl)
+        sm = load_summaries_for(args, stages, mlflow)
+        if "rq1" in stages and bl: run_summarization(client, args.model, cases, args.samples, bl, sm)
+        if "rq2" in stages and bl: run_framing(client, args.model, cases, args.samples, sm, bl)
         if "rq3" in stages and bl: run_reconsideration(client, args.model, cases, args.samples, bl)
         elapsed = time.time() - start
         mlflow.log_metric("total_time_seconds", elapsed)

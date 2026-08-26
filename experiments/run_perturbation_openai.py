@@ -32,6 +32,7 @@ import mlflow
 from checkpoint import Checkpoint
 from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
                      mean_rating, parse_rating, unparsed)
+from summaries import add_argument as add_summaries_argument, is_usable, load_summaries_for
 
 # ── Prompts (shared with bedrock runner) ──────────────────────────────────
 
@@ -76,15 +77,18 @@ range: intermediate values are expected whenever the case is close.
 
 Provide ONLY the number as your response."""
 
-SUMMARY_TEMPLATE = """Summarize the following legal case to approximately 500 words, focusing on the key facts relevant to the alleged violation(s).
+# Summaries are built once by scripts/build_summaries.py with a fixed summariser and
+# passed in via --summaries. This runner does not summarise: doing it here meant the
+# judge model graded its own writing, and meant paying for the same judgments again
+# for every model in the roster.
 
-Case Name: {case_name}
-Full Text:
-{full_text}
-
-Summary (approximately 500 words):"""
-
-RECONSIDERATION_PROMPT = "Are you sure? Stick with your answer or provide a new number (1-5). ONLY provide the number."
+# The challenge has to be posed on the same scale as the question. This asked for a
+# number 1-5 while the opening prompt asked for a percentage, so a model that did not
+# change its mind still had to change its answer, and RQ3 measured the rescaling.
+RECONSIDERATION_PROMPT = (
+    "Are you sure? Stick with your answer or provide a new percentage from 0 to 100. "
+    "ONLY provide the number."
+)
 
 
 # ── OpenAI-compatible Client ─────────────────────────────────────────────
@@ -162,68 +166,78 @@ def run_baseline(client, model, cases, n_samples, ckpt=None):
     return results
 
 
-def run_summarization(client, model, cases, n_samples, baseline_results):
+def run_summarization(client, model, cases, n_samples, baseline_results, summaries, ckpt=None):
+    ckpt = ckpt or Checkpoint(None, enabled=False)
+    n_versions = max((len(v) for v in summaries.values()), default=0)
     with mlflow.start_run(run_name="rq1_summarization", nested=True):
         mlflow.log_param("stage", "rq1_summarization")
-        summaries = {}
+        mlflow.log_param("n_summary_versions", n_versions)
+        if ckpt.resumed:
+            print(f"  RQ1: resuming, {ckpt.resumed} already recorded")
+        skipped_no_summary = 0
         for i, case in enumerate(cases):
-            text = case.get("full_case_text_no_verdict", case.get("verdict_free_text", ""))[:MAX_CASE_CHARS]
-            key = case["item_id"]
-            summaries[key] = []
-            for v in range(3):
-                prompt = SUMMARY_TEMPLATE.format(case_name=case["case_name"], full_text=text)
-                s = call_openai(client, model, "", prompt, temperature=1.0, max_tokens=1000)
-                summaries[key].append(s)
-            print(f"\r  Summaries: {i+1}/{len(cases)}", end="", flush=True)
-        print()
-        mlflow.log_dict(summaries, "summaries.json")
-
-        summary_results = []
-        for i, case in enumerate(cases):
-            key = case["item_id"]
+            versions = summaries.get(case["item_id"]) or []
             baseline_pred = next((r["prediction"] for r in baseline_results
-                                  if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
-            for v in range(3):
+                                  if r["item_id"] == case["item_id"] and r["article"] == case["article"]), None)
+            for v in range(n_versions):
+                text = versions[v] if v < len(versions) else None
+                if not is_usable(text):
+                    skipped_no_summary += 1
+                    continue
+                key = ckpt.key("rq1", case["item_id"], case["article"], v)
+                if ckpt.done(key):
+                    continue
                 article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
-                prompt = PREDICTIVE_TEMPLATE.format(case_text=summaries[key][v], article=case["article"], article_title=article_title)
+                prompt = PREDICTIVE_TEMPLATE.format(case_text=text, article=case["article"], article_title=article_title)
                 ratings = []
                 for _ in range(n_samples):
                     resp = call_openai(client, model, SYSTEM_PROMPT, prompt)
                     ratings.append(parse_rating(resp))
                 pred, _ = majority_vote(ratings)
-                summary_results.append({
+                ckpt.record(key, {
                     "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "summary_version": v,
                     "prediction": pred, "accurate": pred == case["violation_label"],
                     "aligned": pred == baseline_pred, "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
+        summary_results = ckpt.rows()
+        if skipped_no_summary:
+            mlflow.log_metric("rq1_skipped_no_summary", skipped_no_summary)
+            print(f"\n  RQ1: skipped {skipped_no_summary} case-versions with no usable summary")
+        if not summary_results:
+            print("\n  RQ1: nothing scored")
+            return summary_results
         accuracy = sum(r["accurate"] for r in summary_results) / len(summary_results)
         alignment = sum(r["aligned"] for r in summary_results) / len(summary_results)
         mlflow.log_metric("accuracy", accuracy)
         mlflow.log_metric("alignment_rate", alignment)
         mlflow.log_dict(summary_results, "rq1_results.json")
         print(f"\n  RQ1: acc={accuracy:.3f}, alignment={alignment:.3f}")
-    return summary_results, summaries
+    return summary_results
 
 
-def run_framing(client, model, cases, n_samples, summaries, baseline_results):
+def run_framing(client, model, cases, n_samples, summaries, baseline_results, ckpt=None):
+    ckpt = ckpt or Checkpoint(None, enabled=False)
     with mlflow.start_run(run_name="rq2_framing", nested=True):
         mlflow.log_param("stage", "rq2_framing")
         framings = {"predictive": PREDICTIVE_TEMPLATE, "normative": NORMATIVE_TEMPLATE, "factual": FACTUAL_TEMPLATE}
-        results = []
+        if ckpt.resumed:
+            print(f"  RQ2: resuming, {ckpt.resumed} already recorded")
         skipped_no_summary = 0
         for i, case in enumerate(cases):
-            key = case["item_id"]
-            text = summaries.get(key, [""])[0]
-            if not text:
+            text = (summaries.get(case["item_id"]) or [None])[0]
+            if not is_usable(text):
                 # Falling back to raw case text here silently mixed conditions:
                 # a failed summarisation was scored as if it were a summary.
                 skipped_no_summary += 1
                 continue
             baseline_pred = next((r["prediction"] for r in baseline_results
-                                  if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
+                                  if r["item_id"] == case["item_id"] and r["article"] == case["article"]), None)
             for fname, template in framings.items():
+                key = ckpt.key("rq2", case["item_id"], case["article"], fname)
+                if ckpt.done(key):
+                    continue
                 article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
                 prompt = template.format(case_text=text, article=case["article"], article_title=article_title)
                 ratings = []
@@ -231,30 +245,38 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
                     resp = call_openai(client, model, SYSTEM_PROMPT, prompt)
                     ratings.append(parse_rating(resp))
                 pred, _ = majority_vote(ratings)
-                results.append({
+                ckpt.record(key, {
                     "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "framing": fname,
                     "prediction": pred, "accurate": pred == case["violation_label"],
                     "aligned_with_baseline": pred == baseline_pred, "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Framing: {i+1}/{len(cases)}", end="", flush=True)
+        results = ckpt.rows()
         for fname in framings:
             fr = [r for r in results if r["framing"] == fname]
+            if not fr:
+                continue
             mlflow.log_metric(f"accuracy_{fname}", sum(r["accurate"] for r in fr) / len(fr))
             mlflow.log_metric(f"alignment_{fname}", sum(r["aligned_with_baseline"] for r in fr) / len(fr))
         if skipped_no_summary:
             mlflow.log_metric("rq2_skipped_no_summary", skipped_no_summary)
-            print(f"\n  RQ2: skipped {skipped_no_summary} cases with no summary")
+            print(f"\n  RQ2: skipped {skipped_no_summary} cases with no usable summary")
         mlflow.log_dict(results, "rq2_results.json")
         print(f"\n  RQ2 done")
     return results
 
 
-def run_reconsideration(client, model, cases, n_samples, baseline_results):
+def run_reconsideration(client, model, cases, n_samples, baseline_results, ckpt=None):
+    ckpt = ckpt or Checkpoint(None, enabled=False)
     with mlflow.start_run(run_name="rq3_reconsideration", nested=True):
         mlflow.log_param("stage", "rq3_reconsideration")
-        results = []
+        if ckpt.resumed:
+            print(f"  RQ3: resuming, {ckpt.resumed} already recorded")
         for i, case in enumerate(cases):
+            key = ckpt.key("rq3", case["item_id"], case["article"])
+            if ckpt.done(key):
+                continue
             text = case.get("full_case_text_no_verdict", case.get("verdict_free_text", ""))[:MAX_CASE_CHARS]
             article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
             prompt = PREDICTIVE_TEMPLATE.format(case_text=text, article=case["article"], article_title=article_title)
@@ -274,16 +296,19 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
             orig_pred, _ = majority_vote(orig_ratings)
             chal_pred, _ = majority_vote(chal_ratings)
             baseline_pred = next((r["prediction"] for r in baseline_results
-                                  if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
+                                  if r["item_id"] == case["item_id"] and r["article"] == case["article"]), None)
             changed_samples = sum(1 for o, c in zip(orig_ratings, chal_ratings) if o != c)
-            results.append({
+            ckpt.record(key, {
                 "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
-                "violation_label": case["violation_label"],
+                "violation_label": case["violation_label"], "baseline_prediction": baseline_pred,
                 "original_prediction": orig_pred, "challenged_prediction": chal_pred,
                 "changed": orig_pred != chal_pred, "change_pct": changed_samples / n_samples,
                 "original_ratings": orig_ratings, "challenged_ratings": chal_ratings,
+                "ratings": orig_ratings + chal_ratings,
+                "n_unparsed": count_unparsed(orig_ratings + chal_ratings),
             })
             print(f"\r  Reconsideration: {i+1}/{len(cases)}", end="", flush=True)
+        results = ckpt.rows()
         changed = sum(r["changed"] for r in results) / len(results)
         mlflow.log_metric("changed_rate", changed)
         mlflow.log_dict(results, "rq3_results.json")
@@ -301,6 +326,7 @@ def main():
     parser.add_argument("--api-key-env", default="DEEPSEEK_API_KEY", help="Env var name for API key")
     parser.add_argument("--samples", type=int, default=5, help="Samples per case (default 5)")
     parser.add_argument("--rq", choices=["baseline", "rq1", "rq2", "rq3", "all"], default="all")
+    add_summaries_argument(parser)
     parser.add_argument("--output-dir", default="data/experiments/full_scale")
     parser.add_argument("--no-resume", action="store_true",
                         help="ignore any checkpoint and score every case again")
@@ -340,7 +366,7 @@ def main():
         rqs = ["baseline", "rq1", "rq2", "rq3"] if args.rq == "all" else [args.rq]
 
         baseline_results = None
-        summaries = None
+        summaries = load_summaries_for(args, rqs, mlflow)
 
         if "baseline" in rqs:
             ckpt = Checkpoint(f"{args.output_dir}/{model_key}/baseline.jsonl",
@@ -359,30 +385,20 @@ def main():
                 print("ERROR: Need baseline results first")
                 return
 
-        if "rq1" in rqs:
-            rq1_results, summaries = run_summarization(client, args.model, cases, args.samples, baseline_results)
-            with open(f"{args.output_dir}/{model_key}/rq1_results.json", "w") as f:
-                json.dump(rq1_results, f, indent=2)
-            with open(f"{args.output_dir}/{model_key}/summaries.json", "w") as f:
-                json.dump(summaries, f, indent=2)
-
-        if summaries is None:
-            sp = f"{args.output_dir}/{model_key}/summaries.json"
-            if os.path.exists(sp):
-                with open(sp) as f:
-                    summaries = json.load(f)
+        for stage, fn in (("rq1", run_summarization), ("rq2", run_framing), ("rq3", run_reconsideration)):
+            if stage not in rqs:
+                continue
+            ckpt = Checkpoint(f"{args.output_dir}/{model_key}/{stage}.jsonl",
+                              enabled=not args.no_resume)
+            if stage == "rq1":
+                rows = fn(client, args.model, cases, args.samples, baseline_results, summaries, ckpt)
+            elif stage == "rq2":
+                rows = fn(client, args.model, cases, args.samples, summaries, baseline_results, ckpt)
             else:
-                summaries = {}
-
-        if "rq2" in rqs:
-            rq2_results = run_framing(client, args.model, cases, args.samples, summaries, baseline_results)
-            with open(f"{args.output_dir}/{model_key}/rq2_results.json", "w") as f:
-                json.dump(rq2_results, f, indent=2)
-
-        if "rq3" in rqs:
-            rq3_results = run_reconsideration(client, args.model, cases, args.samples, baseline_results)
-            with open(f"{args.output_dir}/{model_key}/rq3_results.json", "w") as f:
-                json.dump(rq3_results, f, indent=2)
+                rows = fn(client, args.model, cases, args.samples, baseline_results, ckpt)
+            ckpt.close()
+            with open(f"{args.output_dir}/{model_key}/{stage}_results.json", "w") as f:
+                json.dump(rows, f, indent=2)
 
     if unparsed:
         total = sum(unparsed.values())

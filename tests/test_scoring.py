@@ -235,3 +235,20 @@ def test_count_unparsed():
     assert count_unparsed([80, None, 20]) == 1
     assert count_unparsed([None, None]) == 2
     assert count_unparsed([50]) == 0
+
+
+def test_baseline_is_joined_by_item_id_not_case_name():
+    """Every arm looks up its baseline prediction to compute alignment.
+
+    Case names are not unique across the corpus, so a name-based lookup silently
+    takes the first match -- which for a repeated name is a different judgment, and
+    the alignment figure then compares two unrelated cases.
+    """
+    import re
+    from pathlib import Path
+    runners = sorted((Path(__file__).resolve().parent.parent / "experiments")
+                     .glob("run_perturbation_*.py"))
+    assert len(runners) >= 4
+    for path in runners:
+        src = path.read_text()
+        assert not re.search(r'\["case_name"\]\s*==\s*case\["case_name"\]', src), path.name
