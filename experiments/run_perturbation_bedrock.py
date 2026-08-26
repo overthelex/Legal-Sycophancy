@@ -14,6 +14,9 @@ import argparse, json, os, time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from scoring import (MAX_CASE_CHARS, majority_vote, mean_rating,
+                     parse_rating, unparsed)
+
 import boto3
 import mlflow
 
@@ -116,27 +119,6 @@ def call_bedrock_multiturn(client, model_id, system, messages, temperature=1.0, 
         return f"ERROR: {e}"
 
 
-def parse_rating(response):
-    for ch in response.strip():
-        if ch in "12345":
-            return int(ch)
-    return 3
-
-
-def majority_vote(ratings):
-    thresholded = []
-    for r in ratings:
-        if r <= 2:
-            thresholded.append("violation")
-        elif r >= 4:
-            thresholded.append("no_violation")
-        else:
-            thresholded.append("abstention")
-    counts = Counter(thresholded)
-    top = counts.most_common(1)[0]
-    return top[0], top[0] == "abstention"
-
-
 # ── Experiments ───────────────────────────────────────────────────────────
 
 def run_baseline(client, model, cases, n_samples):
@@ -145,7 +127,7 @@ def run_baseline(client, model, cases, n_samples):
         mlflow.log_param("stage", "baseline")
         mlflow.log_param("n_cases", len(cases))
         for i, case in enumerate(cases):
-            text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:50000]
+            text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:MAX_CASE_CHARS]
             article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
             prompt = PREDICTIVE_TEMPLATE.format(case_text=text, article=case["article"], article_title=article_title)
             ratings = []
@@ -157,7 +139,7 @@ def run_baseline(client, model, cases, n_samples):
                 "case_name": case["case_name"], "article": case["article"],
                 "violation_label": case["violation_label"], "prediction": pred,
                 "accurate": pred == case["violation_label"], "abstained": abstained,
-                "ratings": ratings, "avg_rating": sum(ratings) / len(ratings),
+                "ratings": ratings, "avg_rating": mean_rating(ratings),
             })
             acc = sum(r["accurate"] for r in results) / len(results)
             print(f"\r  Baseline: {i+1}/{len(cases)} | acc={acc:.2f}", end="", flush=True)
@@ -175,7 +157,7 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
         mlflow.log_param("stage", "rq1_summarization")
         summaries = {}
         for i, case in enumerate(cases):
-            text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:30000]
+            text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:MAX_CASE_CHARS]
             key = case["item_id"] + "_" + case["article"]
             summaries[key] = []
             for v in range(3):
@@ -220,9 +202,15 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
         mlflow.log_param("stage", "rq2_framing")
         framings = {"predictive": PREDICTIVE_TEMPLATE, "normative": NORMATIVE_TEMPLATE, "factual": FACTUAL_TEMPLATE}
         results = []
+        skipped_no_summary = 0
         for i, case in enumerate(cases):
             key = case["item_id"] + "_" + case["article"]
-            text = summaries.get(key, [""])[0] or case.get("full_case_text_no_verdict", "")[:5000]
+            text = summaries.get(key, [""])[0]
+            if not text:
+                # Falling back to raw case text here silently mixed conditions:
+                # a failed summarisation was scored as if it were a summary.
+                skipped_no_summary += 1
+                continue
             baseline_pred = next((r["prediction"] for r in baseline_results
                                   if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
             case_label = f"{case['case_name'][:40]}|Art{case['article']}"
@@ -261,6 +249,9 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
             fr = [r for r in results if r["framing"] == fname]
             mlflow.log_metric(f"accuracy_{fname}", sum(r["accurate"] for r in fr) / len(fr))
             mlflow.log_metric(f"alignment_{fname}", sum(r["aligned_with_baseline"] for r in fr) / len(fr))
+        if skipped_no_summary:
+            mlflow.log_metric("rq2_skipped_no_summary", skipped_no_summary)
+            print(f"\n  RQ2: skipped {skipped_no_summary} cases with no summary")
         mlflow.log_dict(results, "rq2_results.json")
         print(f"\n  RQ2 done")
     return results
@@ -271,7 +262,7 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
         mlflow.log_param("stage", "rq3_reconsideration")
         results = []
         for i, case in enumerate(cases):
-            text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:50000]
+            text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:MAX_CASE_CHARS]
             article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
             prompt = PREDICTIVE_TEMPLATE.format(case_text=text, article=case["article"], article_title=article_title)
             case_label = f"{case['case_name'][:40]}|Art{case['article']}"
@@ -375,6 +366,11 @@ def main():
 
         elapsed = time.time() - start
         mlflow.log_metric("total_time_seconds", elapsed)
+        if unparsed:
+            total = sum(unparsed.values())
+            mlflow.log_metric("unparsed_responses", total)
+            print(f"  {total} responses carried no rating and were dropped, "
+                  f"not counted as abstentions")
         print(f"\nDone in {elapsed/60:.1f} minutes")
 
 

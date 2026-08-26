@@ -23,6 +23,9 @@ import json
 import os
 import time
 from collections import Counter
+
+from scoring import (MAX_CASE_CHARS, majority_vote, mean_rating,
+                     parse_rating, unparsed)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import mlflow
@@ -144,14 +147,6 @@ def call_llm_multiturn(client: openai.OpenAI, model: str, messages: list,
         return f"ERROR: {e}"
 
 
-def parse_rating(response: str) -> int:
-    """Extract 1-5 rating from response."""
-    for ch in response.strip():
-        if ch in "12345":
-            return int(ch)
-    return 3  # default to abstention
-
-
 def predict_case(client, model, case_text, article, template, n_samples=10):
     """Run N predictions for a case-article pair."""
     article_title = ARTICLE_TITLES.get(article, f"Article {article}")
@@ -163,22 +158,6 @@ def predict_case(client, model, case_text, article, template, n_samples=10):
         ratings.append(parse_rating(resp))
 
     return ratings
-
-
-def majority_vote(ratings: list) -> tuple:
-    """Returns (prediction, is_abstention). 1-2=violation, 4-5=no_violation, 3=abstention."""
-    thresholded = []
-    for r in ratings:
-        if r <= 2:
-            thresholded.append("violation")
-        elif r >= 4:
-            thresholded.append("no_violation")
-        else:
-            thresholded.append("abstention")
-
-    counts = Counter(thresholded)
-    top = counts.most_common(1)[0]
-    return top[0], top[0] == "abstention"
 
 
 # ── Experiments ───────────────────────────────────────────────────────────
@@ -206,7 +185,7 @@ def run_baseline(client, model, cases, n_samples, parent_run_id):
                 "accurate": accurate,
                 "abstained": abstained,
                 "ratings": ratings,
-                "avg_rating": sum(ratings) / len(ratings),
+                "avg_rating": mean_rating(ratings),
             })
             print(f"\r  Baseline: {i+1}/{len(cases)} | acc={sum(r['accurate'] for r in results)/len(results):.2f}", end="", flush=True)
 
@@ -233,7 +212,7 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
             summaries[case_key] = []
 
             for v in range(3):
-                prompt = SUMMARY_TEMPLATE.format(case_name=case["case_name"], full_text=text[:30000])
+                prompt = SUMMARY_TEMPLATE.format(case_name=case["case_name"], full_text=text[:MAX_CASE_CHARS])
                 summary = call_llm(client, model, "", prompt, temperature=1.0, max_tokens=1000)
                 summaries[case_key].append(summary)
 
@@ -292,12 +271,16 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
         }
 
         framing_results = []
+        skipped_no_summary = 0
         for i, case in enumerate(cases):
             case_key = case["item_id"] + "_" + case["article"]
             # Use first summary version
             summary_text = summaries.get(case_key, [""])[0]
             if not summary_text:
-                summary_text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:5000]
+                # Falling back to raw case text here silently mixed conditions:
+                # a failed summarisation was scored as if it were a summary.
+                skipped_no_summary += 1
+                continue
 
             baseline_pred = None
             for br in baseline_results:
