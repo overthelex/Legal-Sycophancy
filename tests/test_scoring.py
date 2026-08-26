@@ -275,3 +275,58 @@ def test_every_result_row_keeps_its_abstentions_and_flip_direction():
             assert '"avg_rating"' in block, f"{path.name}: {block[:90]}"
             if '"aligned' in block:      # arms compared against baseline
                 assert '"flip_direction"' in block, f"{path.name}: {block[:90]}"
+
+
+# --- concurrency: a unit paid for once must be recorded once --------------------
+
+def test_checkpoint_record_is_safe_from_many_threads(tmp_path):
+    """Two threads appending to one handle interleave partial lines.
+
+    A torn line is a unit that was paid for and cannot be read back, and at 20
+    workers the window is not theoretical.
+    """
+    import json as _json
+    from concurrent.futures import ThreadPoolExecutor
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
+    from checkpoint import Checkpoint
+    ckpt = Checkpoint(tmp_path / "arm.jsonl")
+    keys = [Checkpoint.key("baseline", f"case-{i}", "6") for i in range(400)]
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        list(pool.map(lambda k: ckpt.record(k, {"payload": "x" * 200}), keys))
+    ckpt.close()
+    lines = [l for l in (tmp_path / "arm.jsonl").read_text().splitlines() if l.strip()]
+    assert len(lines) == 400
+    parsed = [_json.loads(l) for l in lines]          # no torn lines
+    assert len({r["_key"] for r in parsed}) == 400    # no duplicates, none lost
+
+
+def test_fan_out_runs_every_unit_exactly_once(tmp_path):
+    """Resume plus concurrency must not double-charge a unit."""
+    from collections import Counter as _Counter
+    import importlib, threading
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
+    from checkpoint import Checkpoint
+    runner = importlib.import_module("run_perturbation_openai")
+
+    calls, lock = _Counter(), threading.Lock()
+
+    def work(unit):
+        with lock:
+            calls[unit["key"]] += 1
+        return {"item_id": unit["id"], "ratings": [50], "n_unparsed": 0}
+
+    units = [{"key": Checkpoint.key("baseline", f"c{i}", "6"), "id": f"c{i}"} for i in range(120)]
+
+    ckpt = Checkpoint(tmp_path / "arm.jsonl")
+    runner._fan_out(units[:40], work, ckpt, "test", workers=20)
+    ckpt.close()
+
+    resumed = Checkpoint(tmp_path / "arm.jsonl")          # same file, full unit list
+    assert resumed.resumed == 40
+    rows = runner._fan_out(units, work, resumed, "test", workers=20)
+    resumed.close()
+
+    assert len(rows) == 120
+    assert len({r["item_id"] for r in rows}) == 120
+    assert all(n == 1 for n in calls.values()), "a unit was scored twice"
+    assert len(calls) == 120

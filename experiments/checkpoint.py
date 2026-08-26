@@ -20,11 +20,17 @@ articles.
 """
 
 import json
+import threading
 from pathlib import Path
 
 
 class Checkpoint:
     def __init__(self, path, enabled=True):
+        # Arms fan out over a thread pool. Recording is done on one thread today,
+        # but a lock here is what makes that a choice rather than a requirement:
+        # two threads appending to the same handle interleave partial lines, and a
+        # torn line is a unit that was paid for and cannot be read back.
+        self._lock = threading.Lock()
         self.path = Path(path)
         self.enabled = enabled
         self._rows = []
@@ -55,16 +61,19 @@ class Checkpoint:
 
     def record(self, key, row):
         row = {**row, "_key": key}
-        self._rows.append(row)
-        self._done.add(key)
-        if self._handle:
-            self._handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-            self._handle.flush()
+        with self._lock:
+            self._rows.append(row)
+            self._done.add(key)
+            if self._handle:
+                self._handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                self._handle.flush()
         return row
 
     def rows(self):
         """Recorded rows without the bookkeeping key."""
-        return [{k: v for k, v in r.items() if k != "_key"} for r in self._rows]
+        with self._lock:
+            snapshot = list(self._rows)
+        return [{k: v for k, v in r.items() if k != "_key"} for r in snapshot]
 
     @property
     def resumed(self):
