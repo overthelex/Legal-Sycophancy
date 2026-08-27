@@ -9,7 +9,8 @@
 #   OPENROUTER_API_KEY=... MLFLOW_TRACKING_PASSWORD=... ./scripts/run_roster.sh
 #
 # Env knobs: CONC (models at once, default 8), WORKERS_OVERRIDE (flat worker count,
-# overriding the calibrated per-model values), SAMPLES, OUT, CASES, SUMMARIES.
+# overriding the calibrated per-model values), RQ (arms, default all), SAMPLES,
+# OUT, CASES, SUMMARIES.
 set -uo pipefail
 
 CASES=${CASES:-data/processed/livehrb_1k.json}
@@ -17,6 +18,11 @@ SUMMARIES=${SUMMARIES:-data/processed/summaries_grok46.json}
 OUT=${OUT:-data/experiments/full_scale}
 SAMPLES=${SAMPLES:-3}
 CONC=${CONC:-8}   # all eight at once; the gate exists for smaller reruns
+# Which arms to run. Defaulting to "all" wasted a run: pointing --summaries at the
+# extractive file and leaving this alone sent every model on to RQ3, which reads the
+# full case text and not the summaries at all -- an exact duplicate of work already
+# paid for, and the most expensive arm of the four.
+RQ=${RQ:-all}
 LOGS=${LOGS:-logs/roster}
 
 # Workers per model, sized from measured single-call latency so every model finishes
@@ -47,7 +53,7 @@ for f in "$CASES" "$SUMMARIES"; do
 done
 mkdir -p "$LOGS" "$OUT"
 
-echo "cases=$CASES summaries=$SUMMARIES samples=$SAMPLES conc=$CONC"
+echo "cases=$CASES summaries=$SUMMARIES samples=$SAMPLES conc=$CONC rq=$RQ"
 echo "models: ${#MODELS[@]}   logs: $LOGS"
 echo
 
@@ -61,7 +67,7 @@ for entry in "${MODELS[@]}"; do
   python3 experiments/run_perturbation_openai.py \
       --cases "$CASES" --summaries "$SUMMARIES" --model "$model" \
       --base-url https://openrouter.ai/api/v1 --api-key-env OPENROUTER_API_KEY \
-      --samples "$SAMPLES" --workers "$w" --rq all \
+      --samples "$SAMPLES" --workers "$w" --rq "$RQ" \
       --output-dir "$OUT" > "$LOGS/$slug.log" 2>&1 &
 done
 wait
@@ -73,7 +79,7 @@ echo "[$(date +%H:%M:%S)] roster finished in $(( ($(date +%s) - start) / 60 )) m
 for entry in "${MODELS[@]}"; do
   model=${entry%:*}
   slug=${model//\//_}; slug=${slug//./_}
-  for arm in baseline rq1 rq2 rq3; do
+  for arm in $([ "$RQ" = all ] && echo baseline rq1 rq2 rq3 || echo "$RQ"); do
     [ -s "$OUT/$slug/${arm}_results.json" ] || echo "MISSING $slug/$arm"
   done
 done
