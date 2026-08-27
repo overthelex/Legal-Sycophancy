@@ -23,7 +23,7 @@ Usage:
 """
 
 import argparse, json, os, random, time
-from collections import Counter
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from openai import OpenAI
@@ -101,6 +101,12 @@ ATTEMPTS = 4
 # emitting it. deepseek-v4-pro returns empty 8/8 at 500 and 5/20 at 4,000.
 MAX_COMPLETION_TOKENS = 8000
 
+# Circuit breaker: a sustained run of rows with failed samples means the problem is
+# the environment, not the odd bad response, and every further row is thin data that
+# resume will skip. Wide enough not to trip on a rate-limit burst.
+BREAKER_WINDOW = 40
+BREAKER_RATE = 0.5
+
 
 def _complete(client, model, api_messages, temperature, max_tokens):
     """One completion, retried, because at 20 workers rate limits are normal traffic.
@@ -167,6 +173,7 @@ def _fan_out(units, work, ckpt, label, workers):
         print(f"  {label}: nothing left to do")
         return ckpt.rows()
     done = 0
+    recent = deque(maxlen=BREAKER_WINDOW)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(work, u): u for u in pending}
         for fut in as_completed(futures):
@@ -174,8 +181,23 @@ def _fan_out(units, work, ckpt, label, workers):
             row = fut.result()
             if row is not None:
                 ckpt.record(unit["key"], row)
+                ratings = row.get("ratings") or []
+                recent.append(sum(1 for r in ratings if r is None) / len(ratings)
+                              if ratings else 1.0)
             done += 1
             print(f"\r  {label}: {done}/{len(pending)}", end="", flush=True)
+            if len(recent) == BREAKER_WINDOW and sum(recent) / len(recent) > BREAKER_RATE:
+                # Stop rather than keep writing rows built on one sample instead of
+                # three. A row is checkpointed when its unit completes, so resume
+                # skips it forever; grinding on through an outage quietly converts
+                # the rest of the corpus into thin data. This is what an uplink
+                # failure on 27 Aug did for twenty minutes before it was noticed.
+                for f in futures:
+                    f.cancel()
+                print(f"\n  {label}: STOPPING -- {sum(recent)/len(recent):.0%} of the "
+                      f"last {BREAKER_WINDOW} rows had failed samples. Check the "
+                      f"network, then prune with scripts/prune_degraded.py and resume.")
+                break
     print()
     return ckpt.rows()
 

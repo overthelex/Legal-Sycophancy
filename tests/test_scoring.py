@@ -330,3 +330,43 @@ def test_fan_out_runs_every_unit_exactly_once(tmp_path):
     assert len({r["item_id"] for r in rows}) == 120
     assert all(n == 1 for n in calls.values()), "a unit was scored twice"
     assert len(calls) == 120
+
+
+def test_fan_out_stops_when_most_rows_come_back_empty(tmp_path):
+    """An outage must halt the arm, not fill the corpus with one-sample rows.
+
+    A row is checkpointed when its unit completes, so resume skips it forever.
+    Grinding on through a dead uplink quietly converts the rest of the run into
+    thin data -- which is what happened for twenty minutes on 27 Aug.
+    """
+    import importlib
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
+    from checkpoint import Checkpoint
+    runner = importlib.import_module("run_perturbation_openai")
+
+    def dead(unit):
+        return {"item_id": unit["id"], "ratings": [None, None, None], "n_unparsed": 3}
+
+    units = [{"key": Checkpoint.key("baseline", f"c{i}", "6"), "id": f"c{i}"}
+             for i in range(400)]
+    ckpt = Checkpoint(tmp_path / "arm.jsonl")
+    rows = runner._fan_out(units, dead, ckpt, "test", workers=4)
+    ckpt.close()
+    assert len(rows) < 200, f"breaker did not fire, wrote {len(rows)} of 400"
+
+
+def test_fan_out_does_not_trip_on_healthy_rows(tmp_path):
+    import importlib
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
+    from checkpoint import Checkpoint
+    runner = importlib.import_module("run_perturbation_openai")
+
+    def good(unit):
+        return {"item_id": unit["id"], "ratings": [70, 70, 70], "n_unparsed": 0}
+
+    units = [{"key": Checkpoint.key("baseline", f"c{i}", "6"), "id": f"c{i}"}
+             for i in range(120)]
+    ckpt = Checkpoint(tmp_path / "arm.jsonl")
+    rows = runner._fan_out(units, good, ckpt, "test", workers=8)
+    ckpt.close()
+    assert len(rows) == 120
