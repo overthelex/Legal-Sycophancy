@@ -370,3 +370,27 @@ def test_fan_out_does_not_trip_on_healthy_rows(tmp_path):
     rows = runner._fan_out(units, good, ckpt, "test", workers=8)
     ckpt.close()
     assert len(rows) == 120
+
+
+def test_artifact_failure_does_not_kill_the_arm():
+    """The artifact store is a convenience copy, not the record.
+
+    On prod the EC2 role has no s3:PutObject on the artifacts bucket, and an
+    unguarded log_dict turned a completed baseline arm into a traceback --
+    discarding the reporting for work already paid for and already on disk.
+    """
+    import importlib
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
+    runner = importlib.import_module("run_perturbation_openai")
+
+    class Boom:
+        def log_dict(self, *a, **k):
+            raise RuntimeError("AccessDenied")
+
+    original = runner.mlflow
+    runner.mlflow = Boom()
+    try:
+        runner.log_artifact({"rows": 1}, "baseline_results.json")   # must not raise
+    finally:
+        runner.mlflow = original
+    assert runner.artifact_failures["baseline"] >= 1

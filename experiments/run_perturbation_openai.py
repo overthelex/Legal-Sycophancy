@@ -107,6 +107,8 @@ MAX_COMPLETION_TOKENS = 8000
 BREAKER_WINDOW = 40
 BREAKER_RATE = 0.5
 
+artifact_failures = Counter()
+
 
 def _complete(client, model, api_messages, temperature, max_tokens):
     """One completion, retried, because at 20 workers rate limits are normal traffic.
@@ -156,6 +158,23 @@ def call_openai_multiturn(client, model, system, messages, temperature=1.0, max_
     api_messages = [{"role": "system", "content": system}]
     api_messages += [{"role": m["role"], "content": m["content"]} for m in messages]
     return _complete(client, model, api_messages, temperature, max_tokens)
+
+
+def log_artifact(obj, name):
+    """Copy results into MLflow, but never let that failure kill a finished arm.
+
+    The artifact store is a convenience copy: the authoritative record is the
+    checkpoint file and the results JSON on disk. On prod the EC2 role has no
+    s3:PutObject on the artifacts bucket, and an unguarded log_dict turned a
+    completed baseline arm into a traceback -- throwing away the reporting for work
+    that had already been paid for and written.
+    """
+    try:
+        mlflow.log_dict(obj, name)
+    except Exception as e:
+        artifact_failures[name.split("_")[0]] += 1
+        print(f"\n  artifact {name} not stored ({type(e).__name__}); "
+              f"results are on disk regardless")
 
 
 def _fan_out(units, work, ckpt, label, workers):
@@ -247,7 +266,7 @@ def run_baseline(client, model, cases, n_samples, ckpt=None, workers=1):
         abstention = sum(r["abstained"] for r in results) / len(results)
         mlflow.log_metric("accuracy", accuracy)
         mlflow.log_metric("abstention_rate", abstention)
-        mlflow.log_dict(results, "baseline_results.json")
+        log_artifact(results, "baseline_results.json")
         print(f"\n  Baseline: acc={accuracy:.3f}, abstention={abstention:.3f}")
     return results
 
@@ -300,7 +319,7 @@ def run_summarization(client, model, cases, n_samples, baseline_results, summari
         alignment = sum(r["aligned"] for r in summary_results) / len(summary_results)
         mlflow.log_metric("accuracy", accuracy)
         mlflow.log_metric("alignment_rate", alignment)
-        mlflow.log_dict(summary_results, "rq1_results.json")
+        log_artifact(summary_results, "rq1_results.json")
         print(f"\n  RQ1: acc={accuracy:.3f}, alignment={alignment:.3f}")
     return summary_results
 
@@ -352,7 +371,7 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results, ck
         if skipped_no_summary:
             mlflow.log_metric("rq2_skipped_no_summary", skipped_no_summary)
             print(f"\n  RQ2: skipped {skipped_no_summary} cases with no usable summary")
-        mlflow.log_dict(results, "rq2_results.json")
+        log_artifact(results, "rq2_results.json")
         print(f"\n  RQ2 done")
     return results
 
@@ -403,7 +422,7 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results, ckpt=
         results = _fan_out(units, work, ckpt, "RQ3", workers)
         changed = sum(r["changed"] for r in results) / len(results)
         mlflow.log_metric("changed_rate", changed)
-        mlflow.log_dict(results, "rq3_results.json")
+        log_artifact(results, "rq3_results.json")
         print(f"\n  RQ3: changed_rate={changed:.3f}")
     return results
 
