@@ -105,3 +105,18 @@ def test_balanced_accuracy_needs_the_field_it_reads():
     rows = [{"violation_label": "violation"}, {"violation_label": "no_violation"}]
     with pytest.raises(KeyError):
         balanced_accuracy(rows)
+
+
+def test_flip_direction_is_derived_not_trusted():
+    """A stored flip_direction is a snapshot and can go stale.
+
+    Baseline units redone after prune_degraded can vote differently, leaving the
+    value recorded in RQ1/RQ2 pointing at a superseded prediction. Six units moved
+    that way on the 27 Aug run, so the analysis recomputes rather than reads.
+    """
+    stale = {"item_id": "001-1", "article": "6",
+             "prediction": "violation", "flip_direction": "violation->violation"}
+    baseline_now = {("001-1", "6"): "no_violation"}
+    bp = baseline_now[(stale["item_id"], stale["article"])]
+    assert flip_direction(bp, stale["prediction"]) == "no_violation->violation"
+    assert flip_direction(bp, stale["prediction"]) != stale["flip_direction"]

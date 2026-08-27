@@ -18,7 +18,8 @@ import argparse, csv, json, os, sys
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "experiments"))
-from stats import balanced_accuracy, benjamini_hochberg, mcnemar_exact   # noqa: E402
+from stats import (balanced_accuracy, benjamini_hochberg, flip_direction,   # noqa: E402
+                   mcnemar_exact)
 
 ARMS = {"rq1": "summary_version", "rq2": "framing", "rq3": None}
 
@@ -42,6 +43,8 @@ def describe(rows):
         "abstention_rate": sum(1 for r in rows if r.get("abstained")) / n if n else None,
         "n_unparsed": sum(r.get("n_unparsed", 0) for r in rows),
         "mean_confidence": sum(confidences) / len(confidences) if confidences else None,
+        "alignment_rate": (sum(1 for r in rows if r.get("aligned_now")) / n
+                           if n and "aligned_now" in rows[0] else None),
         "flip_rate": sum(directions.values()) / n if n else None,
         "flips_to_violation": directions.get("no_violation->violation", 0),
         "flips_to_no_violation": directions.get("violation->no_violation", 0),
@@ -115,6 +118,18 @@ def main():
                            for r in subset]
                     n01, n10 = paired(ref, subset, variant)
                 else:
+                    # `aligned` and `flip_direction` were computed when the row was
+                    # written, against the baseline prediction as it stood then. A
+                    # baseline unit that is later redone -- because a network failure
+                    # left it on one sample and prune_degraded removed it -- can vote
+                    # differently, and the snapshot in the arm goes stale. Six units
+                    # moved that way on the 27 Aug run. Derive both from the baseline
+                    # on disk instead of trusting what was recorded.
+                    ref = {(r["item_id"], r["article"]): r["prediction"] for r in baseline}
+                    for r in subset:
+                        bp = ref.get((r["item_id"], r["article"]))
+                        r["aligned_now"] = r["prediction"] == bp
+                        r["flip_direction"] = flip_direction(bp, r["prediction"])
                     n01, n10 = paired(baseline, subset, variant)
                 n, pval = mcnemar_exact(n01, n10)
                 comparisons.append({
