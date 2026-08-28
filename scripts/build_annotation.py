@@ -26,6 +26,21 @@ csv.field_size_limit(10 ** 9)
 
 LAW = re.compile(r"(?:^|\n)\s*(?:[IVX]+\.\s*)?THE LAW\s*(?:\n|$)", re.I | re.M)
 
+# Everything before THE LAW is not "the facts": it also holds the statute quotations
+# and international material. 26% of the Court's back-references point there. Asking
+# whether reasoning "rests on" a provision the Court itself quoted is a different and
+# near-trivial question, so those paragraphs are excluded rather than mixed in.
+#
+# The heading is not stable enough to name: RELEVANT DOMESTIC LAW, RELEVANT DOMESTIC
+# LAW AND PRACTICE, RELEVANT LEGAL FRAMEWORK (2019 on), RELEVANT INTERNATIONAL
+# MATERIAL, COMPARATIVE LAW and a dozen more all occur. Match the family and take the
+# earliest, since the legal material always follows the facts.
+FRAMEWORK = re.compile(
+    r"(?:^|\n)[ \t]*(?:[IVX]+\.[ \t]*)?"
+    r"(?:RELEVANT|COMPARATIVE|INTERNATIONAL|EUROPEAN)[A-Z ,\-–&']{4,70}[ \t]*(?:\n|$)")
+
+HUDOC = "https://hudoc.echr.coe.int/eng?i={item_id}"
+
 # "see paragraph 18 above" is a back-reference to this judgment. A bare "§ 137" is
 # usually a citation to another case ("Muršić, cited above, § 137") -- requiring the
 # word "above" cuts the share of fact paragraphs marked as relied upon from 34% to
@@ -56,6 +71,8 @@ Each row shows two pieces of text from the same judgment:
   decision. Somewhere in it is a phrase like *"see paragraph 18 above"*.
 - **`cited_fact`** -- the paragraph our tool believes the Court was pointing at. Its
   number is in `cited_number`.
+- **`full_judgment`** -- a link to the whole judgment on the Court's own site, if you
+  ever want the surrounding context. You are not expected to open it for every row.
 
 Your question is only this:
 
@@ -69,6 +86,10 @@ Your question is only this:
 
 Anything odd about a row goes in `notes` -- wrong-looking numbers, text that stops
 mid-sentence, anything. Those notes are useful to us even when the label is easy.
+
+One thing that is **not** odd: a paragraph containing `...`. Those are the Court's own
+abridgements, mostly where it quotes a long statute and skips the parts that do not
+matter. We reproduce the text exactly as published, so nothing has been cut by us.
 
 ## The distinction that matters most
 
@@ -144,7 +165,13 @@ def find_pairs(full_text):
     if not marks:
         return []
     cut = marks[-1].start()
-    facts = dict(split_paragraphs(full_text[:cut]))
+    pre = full_text[:cut]
+    fw = FRAMEWORK.search(pre)
+    facts = {}
+    for num, body in split_paragraphs(pre):
+        if fw and pre.find(body) >= fw.start():
+            continue                 # a statute quotation, not a fact
+        facts[num] = body
     out = []
     for _, body in split_paragraphs(full_text[cut:]):
         for m in BACKREF.finditer(body):
@@ -188,12 +215,15 @@ def main():
         row = {"case_name": r["doc_name"], "item_id": r["item_id"],
                "article": article.get(r["item_id"], "?"),
                "reasoning": assessment.strip(), "cited_number": num,
-               "cited_fact": cited.strip()}
+               "cited_fact": cited.strip(),
+               "full_judgment": HUDOC.format(item_id=r["item_id"])}
         if len(genuine) < args.items:
             genuine.append(row)
         elif len(controls) < args.controls:
-            cut = LAW.search(r["full_text"]).start()
-            facts = dict(split_paragraphs(r["full_text"][:cut]))
+            pre = r["full_text"][:LAW.search(r["full_text"]).start()]
+            fw = FRAMEWORK.search(pre)
+            facts = {n: b for n, b in split_paragraphs(pre)
+                     if not (fw and pre.find(b) >= fw.start())}
             # the swapped paragraph must not itself be cited by this reasoning, or the
             # honest answer is "yes" and the control scores its own annotator wrong
             cited_here = {g for m in BACKREF.finditer(assessment) for g in m.groups() if g}
@@ -236,7 +266,7 @@ def main():
     ctl_by = rotate([it for it in items if it in controls], offset=1)
 
     fields = ["pair_id", "case_name", "article", "cited_number",
-              "reasoning", "cited_fact", "label", "notes"]
+              "reasoning", "cited_fact", "full_judgment", "label", "notes"]
     for a in range(args.annotators):
         mine = gen_by[a] + ctl_by[a]
         rng.shuffle(mine)                      # so controls are not clustered
