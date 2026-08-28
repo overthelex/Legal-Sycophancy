@@ -36,3 +36,7 @@ hf_cache/
 *.egg-info
 dist
 buildconfig.py
+mlruns/
+
+# annotation sheets carry judgment text and the control key
+annotation/

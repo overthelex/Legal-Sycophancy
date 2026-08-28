@@ -108,6 +108,25 @@ python experiments/generate_summary_versions.py \
 3. **Nationality mention check** (ensure key terms appear early)
 4. **Quality check** (verify no identifying information leaked)
 
+#### Summaries for the perturbation runners
+
+The `run_perturbation_*.py` runners take their summaries from a separate build, for
+the same reason this pipeline is a separate step: a model must not be scored on a
+summary it wrote itself, and the same judgment must not be re-summarised once per
+judge. Build once, then pass the file to every runner:
+
+```bash
+python scripts/build_summaries.py \
+  --cases data/processed/livehrb_1k.json \
+  --summarizer x-ai/grok-4.6 \
+  --api-key-env OPENROUTER_API_KEY \
+  --out data/processed/summaries_grok46.json
+```
+
+The build deduplicates by judgment, checkpoints per (judgment, version), and records
+the summariser inside the file, so results carry their own provenance. Runners fail
+with a message rather than summarising for themselves when `--summaries` is missing.
+
 ### 2. RQ1: Summarization Evaluation
 
 ```bash
