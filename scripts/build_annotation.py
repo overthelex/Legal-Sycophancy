@@ -40,57 +40,102 @@ Thank you for helping. **No legal training is needed.** You are not deciding wha
 legally important -- the Court already did that. You are checking whether our
 automatic extraction read it correctly.
 
+## What you have
+
+One spreadsheet file, `{fname}`, with about {n} rows. Open it in Excel, Numbers or
+Google Sheets. Fill in the **`label`** column, save, and send the file back. Leave
+every other column as it is.
+
+Expect roughly an hour. Most rows take well under a minute.
+
 ## The task
 
 Each row shows two pieces of text from the same judgment:
 
-- **Court's reasoning** -- one paragraph from the section where the Court explains its
-  decision. Somewhere in it there is a phrase like *"see paragraph 18 above"*.
-- **Cited fact** -- the paragraph the Court pointed at.
+- **`reasoning`** -- one paragraph from the section where the Court explains its
+  decision. Somewhere in it is a phrase like *"see paragraph 18 above"*.
+- **`cited_fact`** -- the paragraph our tool believes the Court was pointing at. Its
+  number is in `cited_number`.
 
 Your question is only this:
 
-> **Does the reasoning actually rest on the fact shown?**
+> **Does that reasoning actually rest on the fact shown?**
 
-Put one of these in the `label` column:
-
-| label | when |
+| `label` | when |
 |---|---|
 | `yes` | the reasoning uses that fact, or clearly refers to it |
-| `no` | the fact has nothing to do with what the reasoning is saying |
+| `no` | the fact is not what the reasoning is resting on |
 | `unclear` | you genuinely cannot tell |
 
-Use `unclear` sparingly, but do use it rather than guessing. If something seems off
-about the row itself, say so in `notes`.
+Anything odd about a row goes in `notes` -- wrong-looking numbers, text that stops
+mid-sentence, anything. Those notes are useful to us even when the label is easy.
+
+## The distinction that matters most
+
+Both texts always come from the same case, so almost everything will look *related*.
+Related is not the question. The question is whether the reasoning **leans on** that
+particular fact.
+
+### `yes`
+
+> **reasoning:** "The applicant was held in a cell affording him 2.5 square metres of
+> personal space (see paragraph 18 above), which is below the minimum standard."
+>
+> **cited_fact (18):** "On 4 May 2015 the applicant was placed in cell no. 7, which
+> measured 11 square metres and held four detainees."
+
+The reasoning uses the space figure and that is where it comes from.
+
+### `no`
+
+> **reasoning:** "In January 2007 the applicant underwent a DNA test which excluded
+> his paternity (see paragraph 31 above). It was nevertheless open to him to ask the
+> prosecutor to bring an action on his behalf."
+>
+> **cited_fact (6):** "On 27 October 1995 R, with whom the applicant had been in a
+> relationship, gave birth to a son."
+
+Same story, same people, and the birth is why the case exists at all -- but the
+reasoning is resting on the DNA test and the prosecutor route, not on the birth.
+Background is not the same as relied upon.
+
+### `unclear`
+
+> **reasoning:** "The domestic courts examined the evidence and gave reasons (see
+> paragraphs 24 to 29 above)."
+>
+> **cited_fact (27):** "The hearing was adjourned until 3 March."
+
+The Court pointed at a run of six paragraphs and we are showing you one of them. If
+you cannot tell whether this particular one is doing any work, `unclear` is the
+honest answer. Do not guess.
 
 ## What to ignore
 
 - Whether you agree with the Court.
-- Whether the fact seems important to you.
+- Whether the fact seems important **to you**.
 - Legal terminology you do not recognise. If the reasoning mentions a date, a place, a
   measurement or an event, and the cited paragraph is where that appears, that is
   `yes`.
 
-## An example
+## Please
 
-> **Court's reasoning:** "The applicant was held in a cell affording him 2.5 square
-> metres of personal space (see paragraph 18 above), which is below the minimum
-> standard."
->
-> **Cited fact:** "18. On 4 May 2015 the applicant was placed in cell no. 7, which
-> measured 11 square metres and held four detainees."
-
-Answer: `yes`. The reasoning uses the space figure, and that is where it comes from.
-
-## Practicalities
-
-- Roughly {n} rows. Most take under a minute.
-- Work in order; do not skip rows you find hard, mark them `unclear`.
+- Work in order. Do not skip a hard row -- mark it `unclear` and move on.
 - Some rows are checks on the process rather than on you. You will not be able to tell
-  which, and you are not expected to.
+  which, and you are not meant to.
 - Do not discuss individual rows with the other annotators. Independent answers are
-  the whole point.
+  the entire point of having three of you.
+
+Questions about the task itself are very welcome -- ask before doing eighty rows the
+wrong way.
 """
+
+
+# An annotator cannot read a 15,000-character block, and a block that long is a
+# paragraph-splitting failure rather than a paragraph. Items outside this band are
+# dropped rather than truncated: truncation can cut away the very sentence the
+# reasoning points at, which would turn a good mapping into a false negative.
+MIN_CHARS, MAX_CHARS = 80, 3000
 
 
 def find_pairs(full_text):
@@ -135,6 +180,10 @@ def main():
         pairs = find_pairs(r["full_text"])
         if not pairs:
             continue
+        pairs = [(a, n, c) for a, n, c in pairs
+                 if MIN_CHARS <= len(a) <= MAX_CHARS and MIN_CHARS <= len(c) <= MAX_CHARS]
+        if not pairs:
+            continue
         assessment, num, cited = rng.choice(pairs)
         row = {"case_name": r["doc_name"], "item_id": r["item_id"],
                "article": article.get(r["item_id"], "?"),
@@ -143,14 +192,24 @@ def main():
         if len(genuine) < args.items:
             genuine.append(row)
         elif len(controls) < args.controls:
-            facts = dict(split_paragraphs(r["full_text"][:LAW.search(r["full_text"]).start()]))
-            other = [n for n in facts if n != num]
+            cut = LAW.search(r["full_text"]).start()
+            facts = dict(split_paragraphs(r["full_text"][:cut]))
+            # the swapped paragraph must not itself be cited by this reasoning, or the
+            # honest answer is "yes" and the control scores its own annotator wrong
+            cited_here = {g for m in BACKREF.finditer(assessment) for g in m.groups() if g}
+            other = [n for n, body in facts.items()
+                     if n not in cited_here and MIN_CHARS <= len(body.strip()) <= MAX_CHARS]
             if not other:
                 continue
             swapped = rng.choice(other)
             controls.append({**row, "cited_number": swapped, "cited_fact": facts[swapped].strip()})
         else:
             break
+
+    # every control must be a genuine negative, checked rather than assumed
+    for c in controls:
+        cited = {g for m in BACKREF.finditer(c["reasoning"]) for g in m.groups() if g}
+        assert c["cited_number"] not in cited, "control %s shows a paragraph the reasoning cites" % c["case_name"]
 
     items = genuine + controls
     rng.shuffle(items)
@@ -180,7 +239,7 @@ def main():
         w = csv.DictWriter(f, fieldnames=["pair_id", "kind", "expected"])
         w.writeheader(); w.writerows(key_rows)
     with open(f"{args.out}_INSTRUCTIONS.md", "w") as f:
-        f.write(INSTRUCTIONS.format(n=per))
+        f.write(INSTRUCTIONS.format(n=per, fname=os.path.basename(f"{args.out}_sheet_annotatorN.csv")))
 
     print(f"\n  {args.out}_key.csv: {len(controls)} controls among {len(items)} items"
           f" -- do not send this to the annotators")
