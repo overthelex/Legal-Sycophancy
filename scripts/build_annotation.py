@@ -44,17 +44,28 @@ FRAMEWORK = re.compile(
     r"(?:RELEVANT|COMPARATIVE|INTERNATIONAL|EUROPEAN)[A-Z ,\-\u2013&'\xa0]{4,70}[^\S\n]*(?:\n|$)")
 
 # A paragraph runs to the next numbered one, so the last paragraph of a section drags
-# the following heading in with it. Cut it back off before anyone has to read it.
+# every heading that follows it into its own text. Two forms occur and both must go:
+#
+#   II.\xa0\xa0RELEVANT LAW AND PRACTICE          all caps, roman numeral
+#   A.\xa0\xa0Relevant European Union law materials   title case, letter
+#
+# Trimming only the final line is not enough: when the title-case sub-heading is last,
+# it fails an all-caps test and blocks the all-caps line above it from ever being seen.
+# So cut at the FIRST heading-like line rather than peeling from the end.
+NBSP = r"[^\S\n]"
 HEADING_LINE = re.compile(
-    r"\n[^\S\n]*(?:[IVXL]+\.[^\S\n]*)?[A-Z][A-Z0-9 ,\-\u2013&'()\xa0]{5,}[^\S\n]*$")
+    r"\n" + NBSP + r"*(?:"
+    r"(?:[IVXL]+\.|[A-Z]\.|\([a-z]\))?" + NBSP + r"*[A-Z][A-Z0-9 ,\-\u2013&'()\xa0]{5,}"   # ALL CAPS
+    r"|(?:[IVXL]+\.|[A-Z]\.)" + NBSP + r"+[A-Z][^\n.]{4,80}"                                  # A. Title case
+    r")" + NBSP + r"*(?=\n|$)")
 
 
-def trim_trailing_heading(body):
-    prev = None
-    while prev != body:
-        prev = body
-        body = HEADING_LINE.sub("", body).rstrip()
-    return body
+def trim_headings(body, boundary_text=None):
+    """Return the paragraph up to the first heading that follows it."""
+    m = HEADING_LINE.search(body)
+    if m:
+        body = body[:m.start()]
+    return body.rstrip()
 
 
 HUDOC = "https://hudoc.echr.coe.int/eng?i={item_id}"
@@ -189,9 +200,9 @@ def find_pairs(full_text):
     for num, body in split_paragraphs(pre):
         if fw and pre.find(body) >= fw.start():
             continue                 # a statute quotation, not a fact
-        facts[num] = trim_trailing_heading(body)
+        facts[num] = trim_headings(body)
     out = []
-    for _, body in ((n, trim_trailing_heading(b)) for n, b in split_paragraphs(full_text[cut:])):
+    for _, body in ((n, trim_headings(b)) for n, b in split_paragraphs(full_text[cut:])):
         for m in BACKREF.finditer(body):
             for g in m.groups():
                 if g and g in facts:
@@ -240,7 +251,7 @@ def main():
         elif len(controls) < args.controls:
             pre = r["full_text"][:LAW.search(r["full_text"]).start()]
             fw = FRAMEWORK.search(pre)
-            facts = {n: trim_trailing_heading(b) for n, b in split_paragraphs(pre)
+            facts = {n: trim_headings(b) for n, b in split_paragraphs(pre)
                      if not (fw and pre.find(b) >= fw.start())}
             # the swapped paragraph must not itself be cited by this reasoning, or the
             # honest answer is "yes" and the control scores its own annotator wrong
