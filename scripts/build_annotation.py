@@ -26,6 +26,13 @@ csv.field_size_limit(10 ** 9)
 
 LAW = re.compile(r"(?:^|\n)\s*(?:[IVX]+\.\s*)?THE LAW\s*(?:\n|$)", re.I | re.M)
 
+# Everything before THE FACTS is PROCEDURE: who lodged the application, who represented
+# whom, when it was communicated. Two controls drew their swapped paragraph from there
+# ("The applicant was represented by Mr M. Umicevic, a lawyer practising in Zagreb"),
+# which any annotator spots as boilerplate in a second -- so the control stops testing
+# attention and starts testing whether they can recognise a form letter.
+FACTS = re.compile(r"(?:^|\n)\s*(?:[IVX]+\.\s*)?THE FACTS\s*(?:\n|$)", re.I | re.M)
+
 # Everything before THE LAW is not "the facts": it also holds the statute quotations
 # and international material. 26% of the Court's back-references point there. Asking
 # whether reasoning "rests on" a provision the Court itself quoted is a different and
@@ -39,9 +46,15 @@ LAW = re.compile(r"(?:^|\n)\s*(?:[IVX]+\.\s*)?THE LAW\s*(?:\n|$)", re.I | re.M)
 # MATERIALS" with non-breaking spaces, so a pattern built on ordinary ones finds no
 # heading at all and every statute quotation passes as a fact. Second time the same
 # character has broken a pattern in this project -- the first was paragraph numbers.
+#
+# The heading does not always end its line. Y v. Serbia runs the whole hierarchy
+# together -- "RELEVANT LEGAL FRAMEWORK        Domestic legal framework   Constitution
+# of the Republic of Serbia 2006 (...)" -- so a pattern anchored to the end of the line
+# saw no heading and let the Serbian Constitution through as a fact. Only the start
+# position is needed, so the end anchor is gone.
 FRAMEWORK = re.compile(
     r"(?:^|\n)[^\S\n]*(?:[IVXL]+\.[^\S\n]*)?"
-    r"(?:RELEVANT|COMPARATIVE|INTERNATIONAL|EUROPEAN)[A-Z ,\-\u2013&'\xa0]{4,70}[^\S\n]*(?:\n|$)")
+    r"(?:RELEVANT|COMPARATIVE|INTERNATIONAL|EUROPEAN)[A-Z ,\-\u2013&'\xa0]{4,70}")
 
 # A paragraph runs to the next numbered one, so the last paragraph of a section drags
 # every heading that follows it into its own text. Two forms occur and both must go:
@@ -53,11 +66,43 @@ FRAMEWORK = re.compile(
 # it fails an all-caps test and blocks the all-caps line above it from ever being seen.
 # So cut at the FIRST heading-like line rather than peeling from the end.
 NBSP = r"[^\S\n]"
+# The title-case branch was capped at 80 characters and at two enumerator forms. Both
+# bounds were guesses, and both were wrong on the corpus: "B.  Civil proceedings
+# concerning use of the applicant's land by the electricity company" is 83 characters
+# and survived into a cited fact, and "(b)  Obligation to protect the applicant" uses
+# a bracketed letter the branch did not accept. A heading is recognised by standing
+# alone on its line with no full stop, not by its length, so the cap is now 140 -- long
+# enough for every heading seen in the corpus and still short enough to exclude prose.
 HEADING_LINE = re.compile(
     r"\n" + NBSP + r"*(?:"
     r"(?:[IVXL]+\.|[A-Z]\.|\([a-z]\))?" + NBSP + r"*[A-Z][A-Z0-9 ,\-\u2013&'()\xa0]{5,}"   # ALL CAPS
-    r"|(?:[IVXL]+\.|[A-Z]\.)" + NBSP + r"+[A-Z][^\n.]{4,80}"                                  # A. Title case
+    r"|(?:[IVXL]+\.|[A-Z]\.|\([a-z]\))" + NBSP + r"+[A-Z][^\n.]{4,140}"                      # A. Title case
     r")" + NBSP + r"*(?=\n|$)")
+
+
+# Four rounds of widening HEADING_LINE were four rounds of losing to a heading form I
+# had not seen: 83 characters, then "(b)", then a bare "Conclusion on admissibility"
+# with no enumerator at all, then "(\u03b1)" with a Greek alpha, then "the 2018 contact
+# oRder and its Enforcement" starting in lower case. Naming the forms does not converge.
+#
+# What every one of them has in common is structural: a heading does not finish a
+# sentence. Paragraph prose ends in "." or a closing quote; a heading ends in a word.
+# So after the lexical pass, drop trailing lines that close no sentence. Interior lines
+# are left alone -- HUDOC breaks lines mid-sentence, and one such line is not a heading.
+CLOSES = ('.', ';', '!', '?', '\u201d', '"', "'", '\u2019')
+
+
+def is_heading_only(body):
+    """A numbered sub-heading masquerading as a paragraph.
+
+    Sections are numbered in the same space as paragraphs -- "5.  Rzeszow Prison" is a
+    sub-heading, not paragraph 5 -- and because it comes later in the document it used
+    to overwrite the real paragraph 5 in the lookup. A back-reference to 5 then showed
+    the annotator a heading. Eleven candidate pairs in the corpus were of this kind.
+    """
+    text = body.replace("\xa0", " ").strip()
+    text = re.sub(r"^\d{1,3}\.\s*", "", text)
+    return bool(text) and "\n" not in text and len(text) <= 120 and not text.endswith(CLOSES)
 
 
 def trim_headings(body, boundary_text=None):
@@ -65,7 +110,102 @@ def trim_headings(body, boundary_text=None):
     m = HEADING_LINE.search(body)
     if m:
         body = body[:m.start()]
-    return body.rstrip()
+    lines = body.split("\n")
+    while len(lines) > 1:
+        tail = lines[-1].replace("\xa0", " ").strip()
+        if tail and tail.endswith(CLOSES):
+            break
+        # 120 was a guess and it cost one more heading: "Proceedings for the
+        # applicant's detention as a preventive measure (confinement in an institution
+        # for mentally ill offenders)" is 124 characters. The bound exists only to stop
+        # a genuinely long line of prose being eaten, and prose that long practically
+        # always closes a sentence, so 180 is safe and 120 was not.
+        if len(tail) > 180:
+            break
+        lines.pop()
+    return "\n".join(lines).rstrip()
+
+
+# The premise of the whole sheet is that a back-reference marks what *the Court* relied
+# on. THE LAW also recites what the parties argued, and there the same phrase marks what
+# a party relied on -- a different claim, and not the one we are validating. Ten of the
+# hundred genuine pairs were of this kind, presented to the annotator under the heading
+# "COURT'S REASONING": "The Government submitted that the applicant had for the most
+# part been self-sufficient (see paragraphs 29, 37 and 97 above)".
+PARTY = re.compile(
+    r"\b(?:the\s+)?(?:Government|applicants?|first applicant|second applicant|parties)\b"
+    r"[^.]{0,60}?\b(?:submitted|argued|contended|claimed|stressed|maintained|stated|"
+    r"alleged|complained|conceded|disputed|pointed out|took issue|relied|sought|"
+    r"emphasised|emphasized|referring)\b",
+    re.I)
+COURT_VOICE = re.compile(r"\bthe Court\b|\bit (?:notes|observes|considers|finds|recalls|reiterates)\b", re.I)
+SENTENCE = re.compile(r"(?<=[.;])\s+(?=[A-Z\u201c\"])")
+
+
+# Three of twenty controls showed a paragraph an annotator dismisses without reading:
+# "The applicant was born in 1995 ... He was represented by Mr A. Adamczuk, a lawyer
+# practising in Zamosc", and the transitional "The facts of the case, as submitted by
+# the parties, may be summarised as follows." A control that is obvious is not a
+# control -- it tests whether the annotator recognises a form of words, not whether
+# they read the pair.
+NOT_A_FACT = re.compile(
+    r"^\s*\d{1,3}\.\s*(?:The (?:facts|circumstances) of the case[^.]{0,60}"
+    r"summarised as follows|The case originated in an application)"
+    r"|(?:was|were) represented by (?:Mr|Ms|Mrs|M\.|their Agent|the Agent)\b"
+    r"|a lawyer practising in", re.I)
+
+
+def is_fact(body):
+    """A paragraph that states something about the case, not about the file."""
+    head = body.replace("\xa0", " ")[:400]
+    return not NOT_A_FACT.search(head)
+
+
+def opens_with_submission(paragraph):
+    """The paragraph recites a party's argument from its first sentence on.
+
+    Distinct from attributed_to_party, which asks about the citing sentence alone.
+    A paragraph opening "The Government further submitted that ..." is a summary of
+    submissions throughout, whatever the grammar of its later sentences.
+    """
+    # Strip the paragraph number BEFORE splitting: "36." ends in a full stop, so the
+    # splitter treats it as the first sentence and every test then runs on "36".
+    body = re.sub(r"^\s*\d{1,3}\.\s*", "", paragraph.replace("\n", " "))
+    first = SENTENCE.split(body)[0]
+    return bool(PARTY.search(first)) and not COURT_VOICE.search(first)
+
+
+def attributed_to_party(paragraph, number):
+    """True when the sentence citing `number` reports a party's argument, not the Court's."""
+    for sent in SENTENCE.split(paragraph.replace("\n", " ")):
+        for m in BACKREF.finditer(sent):
+            nums = [g for g in m.groups() if g]
+            span = nums
+            if len(nums) == 2 and re.search(r"[-\u2013]|\bto\b", m.group(0)):
+                span = [str(x) for x in range(int(nums[0]), int(nums[1]) + 1)]
+            if number in span:
+                return bool(PARTY.search(sent)) and not COURT_VOICE.search(sent)
+    return False
+
+
+# A separate opinion numbers its own paragraphs from 1, so "see paragraph 2 above"
+# inside a dissent points at the dissent's second paragraph, not the judgment's. The
+# sheet showed one such pair -- a dissent arguing against "the majority", mapped onto
+# the judgment's paragraph 2 -- and it is a wrong mapping rather than an odd-looking
+# one. 35 of the corpus's 10,003 candidate pairs came from opinions.
+#
+# The operative part closes the Court's reasoning and everything after it is either the
+# disposition or an opinion, so that is where the assessment region ends.
+OPERATIVE = re.compile(r"(?:^|\n)[^\S\n]*FOR THESE REASONS,?[^\S\n]*THE COURT", re.I)
+OPINION = re.compile(
+    r"(?:^|\n)[^\S\n]*(?:(?:JOINT|PARTLY|PARTIALLY|SEPARATE|CONCURRING|DISSENTING)[A-Z \-,\xa0]*)?"
+    r"(?:CONCURRING|DISSENTING|SEPARATE)[^\S\n]+OPINION", re.I)
+
+
+def assessment_region(full_text, cut):
+    """THE LAW up to the operative part -- the Court speaking in its own voice."""
+    ends = [m.start() for m in (OPERATIVE.search(full_text, cut), OPINION.search(full_text, cut)) if m]
+    return full_text[cut:min(ends)] if ends else full_text[cut:]
 
 
 HUDOC = "https://hudoc.echr.coe.int/eng?i={item_id}"
@@ -195,19 +335,33 @@ def find_pairs(full_text):
         return []
     cut = marks[-1].start()
     pre = full_text[:cut]
-    fw = FRAMEWORK.search(pre)
-    facts = {}
-    for num, body in split_paragraphs(pre):
-        if fw and pre.find(body) >= fw.start():
-            continue                 # a statute quotation, not a fact
-        facts[num] = trim_headings(body)
+    facts = fact_paragraphs(pre)
     out = []
-    for _, body in ((n, trim_headings(b)) for n, b in split_paragraphs(full_text[cut:])):
+    for _, body in ((n, trim_headings(b))
+                    for n, b in split_paragraphs(assessment_region(full_text, cut))
+                    if not is_heading_only(b)):
+        if opens_with_submission(body):
+            continue                 # a recital of what a party argued
         for m in BACKREF.finditer(body):
             for g in m.groups():
-                if g and g in facts:
+                if g and g in facts and not attributed_to_party(body, g):
                     out.append((body, g, facts[g]))
     return out
+
+
+def fact_paragraphs(pre):
+    """The numbered paragraphs of THE FACTS: after PROCEDURE, before the legal material."""
+    start = list(FACTS.finditer(pre))
+    lo = start[-1].end() if start else 0
+    fw = FRAMEWORK.search(pre, lo)
+    facts = {}
+    for num, body in split_paragraphs(pre[lo:]):
+        if fw and pre.find(body, lo) >= fw.start():
+            continue                 # a statute quotation, not a fact
+        if is_heading_only(body) or not is_fact(body):
+            continue                 # a section title, or a note about the file itself
+        facts[num] = trim_headings(body)
+    return facts
 
 
 def main():
@@ -250,9 +404,7 @@ def main():
             genuine.append(row)
         elif len(controls) < args.controls:
             pre = r["full_text"][:LAW.search(r["full_text"]).start()]
-            fw = FRAMEWORK.search(pre)
-            facts = {n: trim_headings(b) for n, b in split_paragraphs(pre)
-                     if not (fw and pre.find(b) >= fw.start())}
+            facts = fact_paragraphs(pre)
             # the swapped paragraph must not itself be cited by this reasoning, or the
             # honest answer is "yes" and the control scores its own annotator wrong
             cited_here = {g for m in BACKREF.finditer(assessment) for g in m.groups() if g}
