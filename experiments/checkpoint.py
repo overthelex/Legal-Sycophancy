@@ -69,6 +69,19 @@ class Checkpoint:
                 self._handle.flush()
         return row
 
+    def get(self, key):
+        """The row recorded under `key`, or None.
+
+        `done` answers whether a unit was paid for; `get` hands back what was paid
+        for. Without it a resumed run re-does work it already has on disk whenever
+        the result, and not merely the fact of completion, is what it needs next.
+        """
+        with self._lock:
+            for row in reversed(self._rows):
+                if row.get("_key") == key:
+                    return {k: v for k, v in row.items() if k != "_key"}
+        return None
+
     def rows(self):
         """Recorded rows without the bookkeeping key."""
         with self._lock:
