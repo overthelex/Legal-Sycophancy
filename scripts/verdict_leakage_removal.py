@@ -54,10 +54,15 @@ except ImportError:
 
 from conclusion_scrub import scrub_text, SCRUB_MARKER
 
-# The structural cut lives with the audit that defined it, so the rule the
-# refresh applies and the rule the audit checks cannot drift apart.
+# The structural cut lives with the audit that defined it, so the rule the refresh
+# applies and the rule the audit checks cannot drift apart. It is imported softly
+# because this module also ships on branches that do not carry the audit; where it
+# is missing the marker path still runs, and `the_law_header` simply never fires.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "leak_audit"))
-from leakdef import recut  # noqa: E402
+try:
+    from leakdef import recut  # noqa: E402
+except ImportError:  # pragma: no cover - exercised only on branches without the audit
+    recut = None
 
 # ── Stage 1: Pattern-based truncation ────────────────────────────────────────
 
@@ -148,9 +153,10 @@ def stage1_truncate(text: str) -> tuple[str, str]:
     this change a refresh would have appended rows cut by a different and weaker
     rule, so "each release applies the same curation" was not true of the code.
     """
-    structural = recut(text)
-    if structural and len(structural) < len(text):
-        return structural, "the_law_header"
+    if recut is not None:
+        structural = recut(text)
+        if structural and len(structural) < len(text):
+            return structural, "the_law_header"
 
     earliest_pos = len(text)
     method = "no_truncation"

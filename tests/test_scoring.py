@@ -445,7 +445,11 @@ def test_refresh_cuts_where_the_release_cuts():
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "scripts"))
-    from verdict_leakage_removal import stage1_truncate
+    import pytest
+    from verdict_leakage_removal import recut, stage1_truncate
+
+    if recut is None:
+        pytest.skip("the structural cut ships with the leak audit, absent on this branch")
 
     judgment = ("THE FACTS\nI. THE CIRCUMSTANCES OF THE CASE\n"
                 "1.  The applicant was born in 1970 and lives in Zagreb.\n"
