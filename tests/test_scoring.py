@@ -430,3 +430,32 @@ def test_abstention_kind_separates_the_two_routes():
     assert abstention_kind([90, 20, 50]) == "split"
     assert abstention_kind([90, 95, 100]) is None
     assert abstention_kind([None, None]) is None
+
+
+def test_refresh_cuts_where_the_release_cuts():
+    """The live-refresh path must apply the rule the released set was built with.
+
+    The published evaluation set records ``the_law_header`` on all 1,212 rows. The
+    refresh path used to truncate at the earliest "the Court's assessment" marker,
+    the rule the leak audit condemned, so a refresh would have appended rows cut by
+    a weaker rule than the release it extends. That breaks the one property a
+    living benchmark needs: that every release is curated the same way.
+    """
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "scripts"))
+    from verdict_leakage_removal import stage1_truncate
+
+    judgment = ("THE FACTS\nI. THE CIRCUMSTANCES OF THE CASE\n"
+                "1.  The applicant was born in 1970 and lives in Zagreb.\n"
+                "THE LAW\n"
+                "2.  The Court considers that there has been a violation of Article 8.")
+    kept, method = stage1_truncate(judgment)
+    assert method == "the_law_header"
+    assert "violation of Article 8" not in kept
+    assert "born in 1970" in kept          # the facts survive the cut
+
+    # a judgment with no THE LAW heading still falls back rather than failing
+    _, fallback = stage1_truncate("THE FACTS\n1.  The applicant was born in 1970.")
+    assert fallback != "the_law_header"
