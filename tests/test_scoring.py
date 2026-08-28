@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
 
 from scoring import (MAX_CASE_CHARS, NO_VIOLATION_BELOW, VIOLATION_ABOVE,  # noqa: E402
-                     majority_vote, parse_rating, unparsed)
+                     abstention_kind, majority_vote, parse_rating, unparsed)
 
 
 # --- an HTTP error string is not a rating -----------------------------------
@@ -394,3 +394,39 @@ def test_artifact_failure_does_not_kill_the_arm():
     finally:
         runner.mlflow = original
     assert runner.artifact_failures["baseline"] >= 1
+
+
+def test_a_tie_is_an_abstention_whatever_order_the_samples_arrive_in():
+    """The verdict must not depend on which sample came back first.
+
+    `Counter.most_common(1)` breaks a tie by insertion order, so the same three
+    answers scored "violation" or "no_violation" depending on the order the API
+    happened to return them. Every earlier test voted unanimously, so none of
+    them could see it.
+    """
+    assert majority_vote([90, 20, 50]) == ("abstention", True)
+    assert majority_vote([20, 90, 50]) == ("abstention", True)
+    assert majority_vote([50, 90, 20]) == ("abstention", True)
+
+    # two samples, one each way
+    assert majority_vote([90, 20]) == ("abstention", True)
+    assert majority_vote([20, 90]) == ("abstention", True)
+
+    # order independence, stated as the property rather than as three examples
+    import itertools
+    for order in itertools.permutations([95, 10, 50]):
+        assert majority_vote(list(order)) == ("abstention", True)
+
+    # a real majority still wins, and is not disturbed by the fix
+    assert majority_vote([90, 95, 20]) == ("violation", False)
+    assert majority_vote([10, 5, 90]) == ("no_violation", False)
+    # unparsed samples are dropped before the tie is assessed, not counted as a side
+    assert majority_vote([90, 20, None]) == ("abstention", True)
+
+
+def test_abstention_kind_separates_the_two_routes():
+    """A middle answer and a split vote are both abstentions but not the same event."""
+    assert abstention_kind([50, 50, 50]) == "band"
+    assert abstention_kind([90, 20, 50]) == "split"
+    assert abstention_kind([90, 95, 100]) is None
+    assert abstention_kind([None, None]) is None
