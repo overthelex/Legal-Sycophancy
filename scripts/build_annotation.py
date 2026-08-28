@@ -220,20 +220,34 @@ def main():
                  "kind": "control" if it in controls else "genuine",
                  "expected": "no" if it in controls else ""} for it in items]
 
-    # each annotator covers a contiguous two thirds, so every item gets two labels
-    per = len(items) * 2 // args.annotators
+    # Interleave rather than slice. Contiguous thirds left the control share at
+    # 10%, 19% and 21%, so the check on the first annotator was half as strong as on
+    # the third. Assigning each item to two adjacent annotators in rotation, and
+    # doing it separately for controls and genuine items, spreads both evenly.
+    def rotate(subset, offset=0):
+        out = {a: [] for a in range(args.annotators)}
+        for i, it in enumerate(subset):
+            first = (i + offset) % args.annotators
+            out[first].append(it)
+            out[(first + 1) % args.annotators].append(it)
+        return out
+
+    gen_by = rotate([it for it in items if it not in controls])
+    ctl_by = rotate([it for it in items if it in controls], offset=1)
+
     fields = ["pair_id", "case_name", "article", "cited_number",
               "reasoning", "cited_fact", "label", "notes"]
     for a in range(args.annotators):
-        start = (len(items) * a) // args.annotators
-        mine = [items[(start + k) % len(items)] for k in range(per)]
+        mine = gen_by[a] + ctl_by[a]
+        rng.shuffle(mine)                      # so controls are not clustered
         path = f"{args.out}_sheet_annotator{a+1}.csv"
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             w.writeheader()
             for it in mine:
                 w.writerow({**it, "label": "", "notes": ""})
-        print(f"  {path}: {len(mine)} rows")
+        print(f"  {path}: {len(mine)} rows, {len(ctl_by[a])} controls")
+    per = max(len(gen_by[a]) + len(ctl_by[a]) for a in range(args.annotators))
 
     with open(f"{args.out}_key.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["pair_id", "kind", "expected"])
