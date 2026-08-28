@@ -35,9 +35,27 @@ LAW = re.compile(r"(?:^|\n)\s*(?:[IVX]+\.\s*)?THE LAW\s*(?:\n|$)", re.I | re.M)
 # LAW AND PRACTICE, RELEVANT LEGAL FRAMEWORK (2019 on), RELEVANT INTERNATIONAL
 # MATERIAL, COMPARATIVE LAW and a dozen more all occur. Match the family and take the
 # earliest, since the legal material always follows the facts.
+# [^\S\n] rather than [ \t]: HUDOC writes "III.\xa0\xa0RELEVANT INTERNATIONAL
+# MATERIALS" with non-breaking spaces, so a pattern built on ordinary ones finds no
+# heading at all and every statute quotation passes as a fact. Second time the same
+# character has broken a pattern in this project -- the first was paragraph numbers.
 FRAMEWORK = re.compile(
-    r"(?:^|\n)[ \t]*(?:[IVX]+\.[ \t]*)?"
-    r"(?:RELEVANT|COMPARATIVE|INTERNATIONAL|EUROPEAN)[A-Z ,\-–&']{4,70}[ \t]*(?:\n|$)")
+    r"(?:^|\n)[^\S\n]*(?:[IVXL]+\.[^\S\n]*)?"
+    r"(?:RELEVANT|COMPARATIVE|INTERNATIONAL|EUROPEAN)[A-Z ,\-\u2013&'\xa0]{4,70}[^\S\n]*(?:\n|$)")
+
+# A paragraph runs to the next numbered one, so the last paragraph of a section drags
+# the following heading in with it. Cut it back off before anyone has to read it.
+HEADING_LINE = re.compile(
+    r"\n[^\S\n]*(?:[IVXL]+\.[^\S\n]*)?[A-Z][A-Z0-9 ,\-\u2013&'()\xa0]{5,}[^\S\n]*$")
+
+
+def trim_trailing_heading(body):
+    prev = None
+    while prev != body:
+        prev = body
+        body = HEADING_LINE.sub("", body).rstrip()
+    return body
+
 
 HUDOC = "https://hudoc.echr.coe.int/eng?i={item_id}"
 
@@ -171,9 +189,9 @@ def find_pairs(full_text):
     for num, body in split_paragraphs(pre):
         if fw and pre.find(body) >= fw.start():
             continue                 # a statute quotation, not a fact
-        facts[num] = body
+        facts[num] = trim_trailing_heading(body)
     out = []
-    for _, body in split_paragraphs(full_text[cut:]):
+    for _, body in ((n, trim_trailing_heading(b)) for n, b in split_paragraphs(full_text[cut:])):
         for m in BACKREF.finditer(body):
             for g in m.groups():
                 if g and g in facts:
@@ -222,7 +240,7 @@ def main():
         elif len(controls) < args.controls:
             pre = r["full_text"][:LAW.search(r["full_text"]).start()]
             fw = FRAMEWORK.search(pre)
-            facts = {n: b for n, b in split_paragraphs(pre)
+            facts = {n: trim_trailing_heading(b) for n, b in split_paragraphs(pre)
                      if not (fw and pre.find(b) >= fw.start())}
             # the swapped paragraph must not itself be cited by this reasoning, or the
             # honest answer is "yes" and the control scores its own annotator wrong
