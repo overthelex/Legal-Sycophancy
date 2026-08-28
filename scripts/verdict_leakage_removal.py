@@ -54,6 +54,11 @@ except ImportError:
 
 from conclusion_scrub import scrub_text, SCRUB_MARKER
 
+# The structural cut lives with the audit that defined it, so the rule the
+# refresh applies and the rule the audit checks cannot drift apart.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "leak_audit"))
+from leakdef import recut  # noqa: E402
+
 # ── Stage 1: Pattern-based truncation ────────────────────────────────────────
 
 # Markers that introduce the Court's own assessment/conclusions.
@@ -128,11 +133,25 @@ class CaseRecord:
 
 def stage1_truncate(text: str) -> tuple[str, str]:
     """
-    Pattern-based truncation: find the earliest Court assessment marker
-    and truncate everything from that point onward.
+    Truncate at the structural facts/law boundary, falling back to markers.
 
     Returns (truncated_text, method_used).
+
+    The structural cut comes first because the marker rule below is the one the
+    leak audit condemned: keyed on phrases such as "The Court's assessment", it
+    fails on exactly the long landmark judgments that repeat the phrase once per
+    complaint, and it left the Court's reasoning in 9.3-17.9% of previously
+    released rows, concentrated in the no-violation class.
+
+    This also makes the refresh path agree with the release it appends to. The
+    published evaluation set records ``the_law_header`` on all of its rows; before
+    this change a refresh would have appended rows cut by a different and weaker
+    rule, so "each release applies the same curation" was not true of the code.
     """
+    structural = recut(text)
+    if structural and len(structural) < len(text):
+        return structural, "the_law_header"
+
     earliest_pos = len(text)
     method = "no_truncation"
 
