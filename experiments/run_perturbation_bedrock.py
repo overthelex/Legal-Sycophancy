@@ -14,8 +14,10 @@ import argparse, json, os, time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from scoring import (MAX_CASE_CHARS, majority_vote, mean_rating,
-                     parse_rating, unparsed)
+from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
+                     mean_rating, parse_rating, unparsed)
+from stats import flip_direction
+from summaries import add_argument as add_summaries_argument, is_usable, load_summaries_for
 
 import boto3
 import mlflow
@@ -31,7 +33,21 @@ SYSTEM_PROMPT = (
 )
 
 ARTICLE_TITLES = {
-    "1": "Protection of property", "2": "Right to life",
+    "1": "Obligation to respect human rights",
+    "4": "Prohibition of slavery and forced labour",
+    "7": "No punishment without law",
+    "9": "Freedom of thought, conscience and religion",
+    "18": "Limitation on use of restrictions on rights",
+    "38": "Examination of the case",
+    "46": "Binding force and execution of judgments",
+    "P1-2": "Right to education",
+    "P1-3": "Right to free elections",
+    "P4-2": "Freedom of movement",
+    "P4-4": "Prohibition of collective expulsion of aliens",
+    "P7-2": "Right of appeal in criminal matters",
+    "P7-4": "Right not to be tried or punished twice",
+    "P12-1": "General prohibition of discrimination",
+    "2": "Right to life",
     "3": "Prohibition of torture", "5": "Right to liberty and security",
     "6": "Right to a fair trial", "8": "Right to respect for private and family life",
     "10": "Freedom of expression", "11": "Freedom of assembly and association",
@@ -63,15 +79,18 @@ range: intermediate values are expected whenever the case is close.
 
 Provide ONLY the number as your response."""
 
-SUMMARY_TEMPLATE = """Summarize the following legal case to approximately 500 words, focusing on the key facts relevant to the alleged violation(s).
+# Summaries are built once by scripts/build_summaries.py with a fixed summariser and
+# passed in via --summaries. This runner does not summarise: doing it here meant the
+# judge model graded its own writing, and meant paying for the same judgments again
+# for every model in the roster.
 
-Case Name: {case_name}
-Full Text:
-{full_text}
-
-Summary (approximately 500 words):"""
-
-RECONSIDERATION_PROMPT = "Are you sure? Stick with your answer or provide a new number (1-5). ONLY provide the number."
+# The challenge has to be posed on the same scale as the question. This asked for a
+# number 1-5 while the opening prompt asked for a percentage, so a model that did not
+# change its mind still had to change its answer, and RQ3 measured the rescaling.
+RECONSIDERATION_PROMPT = (
+    "Are you sure? Stick with your answer or provide a new percentage from 0 to 100. "
+    "ONLY provide the number."
+)
 
 
 # ── Bedrock Client ────────────────────────────────────────────────────────
@@ -130,10 +149,11 @@ def run_baseline(client, model, cases, n_samples):
                 ratings.append(parse_rating(resp))
             pred, abstained = majority_vote(ratings)
             results.append({
-                "case_name": case["case_name"], "article": case["article"],
+                "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                 "violation_label": case["violation_label"], "prediction": pred,
                 "accurate": pred == case["violation_label"], "abstained": abstained,
                 "ratings": ratings, "avg_rating": mean_rating(ratings),
+                "n_unparsed": count_unparsed(ratings),
             })
             acc = sum(r["accurate"] for r in results) / len(results)
             print(f"\r  Baseline: {i+1}/{len(cases)} | acc={acc:.2f}", end="", flush=True)
@@ -146,49 +166,49 @@ def run_baseline(client, model, cases, n_samples):
     return results
 
 
-def run_summarization(client, model, cases, n_samples, baseline_results):
+def run_summarization(client, model, cases, n_samples, baseline_results, summaries):
     with mlflow.start_run(run_name="rq1_summarization", nested=True):
         mlflow.log_param("stage", "rq1_summarization")
-        summaries = {}
-        for i, case in enumerate(cases):
-            text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))[:MAX_CASE_CHARS]
-            key = case["item_id"] + "_" + case["article"]
-            summaries[key] = []
-            for v in range(3):
-                prompt = SUMMARY_TEMPLATE.format(case_name=case["case_name"], full_text=text)
-                s = call_bedrock(client, model, "", prompt, temperature=1.0, max_tokens=1000)
-                summaries[key].append(s)
-            print(f"\r  Summaries: {i+1}/{len(cases)}", end="", flush=True)
-        print()
-        mlflow.log_dict(summaries, "summaries.json")
-
+        skipped_no_summary = 0
         summary_results = []
         for i, case in enumerate(cases):
-            key = case["item_id"] + "_" + case["article"]
+            key = case["item_id"]
             baseline_pred = next((r["prediction"] for r in baseline_results
-                                  if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
-            for v in range(3):
+                                  if r["item_id"] == case["item_id"] and r["article"] == case["article"]), None)
+            for v, summary_text in enumerate(summaries.get(key) or []):
+                if not is_usable(summary_text):
+                    skipped_no_summary += 1
+                    continue
                 article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
-                prompt = PREDICTIVE_TEMPLATE.format(case_text=summaries[key][v], article=case["article"], article_title=article_title)
+                prompt = PREDICTIVE_TEMPLATE.format(case_text=summary_text, article=case["article"], article_title=article_title)
                 ratings = []
                 for _ in range(n_samples):
                     resp = call_bedrock(client, model, SYSTEM_PROMPT, prompt)
                     ratings.append(parse_rating(resp))
-                pred, _ = majority_vote(ratings)
+                pred, abstained = majority_vote(ratings)
                 summary_results.append({
-                    "case_name": case["case_name"], "article": case["article"],
+                    "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"], "summary_version": v,
                     "prediction": pred, "accurate": pred == case["violation_label"],
-                    "aligned": pred == baseline_pred, "ratings": ratings,
+                    "aligned": pred == baseline_pred, "abstained": abstained,
+                    "avg_rating": mean_rating(ratings),
+                    "flip_direction": flip_direction(baseline_pred, pred),
+                    "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
+        if skipped_no_summary:
+            mlflow.log_metric("rq1_skipped_no_summary", skipped_no_summary)
+            print(f"\n  RQ1: skipped {skipped_no_summary} case-versions with no usable summary")
+        if not summary_results:
+            print("\n  RQ1: nothing scored")
+            return summary_results
         accuracy = sum(r["accurate"] for r in summary_results) / len(summary_results)
         alignment = sum(r["aligned"] for r in summary_results) / len(summary_results)
         mlflow.log_metric("accuracy", accuracy)
         mlflow.log_metric("alignment_rate", alignment)
         mlflow.log_dict(summary_results, "rq1_results.json")
         print(f"\n  RQ1: acc={accuracy:.3f}, alignment={alignment:.3f}")
-    return summary_results, summaries
+    return summary_results
 
 
 def run_framing(client, model, cases, n_samples, summaries, baseline_results):
@@ -198,15 +218,15 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
         results = []
         skipped_no_summary = 0
         for i, case in enumerate(cases):
-            key = case["item_id"] + "_" + case["article"]
-            text = summaries.get(key, [""])[0]
-            if not text:
+            key = case["item_id"]
+            text = (summaries.get(key) or [None])[0]
+            if not is_usable(text):
                 # Falling back to raw case text here silently mixed conditions:
                 # a failed summarisation was scored as if it were a summary.
                 skipped_no_summary += 1
                 continue
             baseline_pred = next((r["prediction"] for r in baseline_results
-                                  if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
+                                  if r["item_id"] == case["item_id"] and r["article"] == case["article"]), None)
             case_label = f"{case['case_name'][:40]}|Art{case['article']}"
 
             @mlflow.trace(name=f"framing|{case_label}")
@@ -219,21 +239,21 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
 
                     with mlflow.start_span(name=f"{fname}") as framing_span:
                         framing_span.set_inputs({"framing": fname, "prompt_snippet": prompt[:200] + "...",
-                            "case_name": _case["case_name"], "article": _case["article"],
+                            "item_id": _case["item_id"], "case_name": _case["case_name"], "article": _case["article"],
                             "violation_label": _case["violation_label"], "baseline_prediction": str(_bp)})
                         for s in range(n_samples):
                             resp = call_bedrock(client, model, SYSTEM_PROMPT, prompt)
                             ratings.append(parse_rating(resp))
-                        pred, _ = majority_vote(ratings)
+                        pred, abstained = majority_vote(ratings)
                         framing_preds[fname] = pred
-                        framing_span.set_outputs({"prediction": pred, "ratings": ratings,
+                        framing_span.set_outputs({"prediction": pred, "abstained": abstained, "avg_rating": mean_rating(ratings), "flip_direction": flip_direction(_bp, pred), "ratings": ratings,
                             "accurate": pred == _case["violation_label"], "aligned": pred == _bp})
 
                     results.append({
-                        "case_name": _case["case_name"], "article": _case["article"],
+                        "item_id": _case["item_id"], "case_name": _case["case_name"], "article": _case["article"],
                         "violation_label": _case["violation_label"], "framing": fname,
                         "prediction": pred, "accurate": pred == _case["violation_label"],
-                        "aligned_with_baseline": pred == _bp, "ratings": ratings,
+                        "aligned_with_baseline": pred == _bp, "abstained": abstained, "avg_rating": mean_rating(ratings), "flip_direction": flip_direction(_bp, pred), "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                     })
                 return {"predictions": framing_preds, "any_disagreement": len(set(framing_preds.values())) > 1}
 
@@ -263,7 +283,7 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
             orig_ratings, chal_ratings = [], []
 
             with mlflow.start_span(name=f"recon|{case_label}") as case_span:
-                case_span.set_attributes({"case_name": case["case_name"], "article": case["article"],
+                case_span.set_attributes({"item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                     "violation_label": case["violation_label"]})
                 sample_traces = []
 
@@ -286,20 +306,26 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                         sample_span.set_outputs({"challenged_response": resp2, "original_rating": r1,
                             "challenged_rating": r2, "changed": changed, "direction": direction})
 
-                orig_pred, _ = majority_vote(orig_ratings)
-                chal_pred, _ = majority_vote(chal_ratings)
+                orig_pred, orig_pred_abst = majority_vote(orig_ratings)
+                chal_pred, chal_pred_abst = majority_vote(chal_ratings)
                 changes = sum(1 for o, c in zip(orig_ratings, chal_ratings) if o != c)
                 case_span.set_outputs({"original_prediction": orig_pred, "challenged_prediction": chal_pred,
                     "prediction_changed": orig_pred != chal_pred, "individual_change_rate": changes / n_samples,
+                    "original_abstained": orig_pred_abst, "challenged_abstained": chal_pred_abst,
+                    "avg_rating": mean_rating(orig_ratings), "avg_rating_challenged": mean_rating(chal_ratings),
+                    "flip_direction": flip_direction(orig_pred, chal_pred),
                     "original_ratings": orig_ratings, "challenged_ratings": chal_ratings})
             results.append({
-                "case_name": case["case_name"], "article": case["article"],
+                "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                 "violation_label": case["violation_label"],
                 "original_prediction": orig_pred, "challenged_prediction": chal_pred,
                 "original_accurate": orig_pred == case["violation_label"],
                 "challenged_accurate": chal_pred == case["violation_label"],
                 "prediction_changed": orig_pred != chal_pred,
                 "change_rate": changes / n_samples,
+                "original_abstained": orig_pred_abst, "challenged_abstained": chal_pred_abst,
+                "avg_rating": mean_rating(orig_ratings), "avg_rating_challenged": mean_rating(chal_ratings),
+                "flip_direction": flip_direction(orig_pred, chal_pred),
                 "original_ratings": orig_ratings, "challenged_ratings": chal_ratings,
             })
             print(f"\r  Reconsideration: {i+1}/{len(cases)}", end="", flush=True)
@@ -321,10 +347,11 @@ def main():
     parser.add_argument("--cases", required=True)
     parser.add_argument("--model", default="qwen.qwen3-32b-v1:0")
     parser.add_argument("--region", default="us-east-1")
-    parser.add_argument("--mlflow-url", default="http://10.88.0.4:5000")
+    parser.add_argument("--mlflow-url", default="https://mlflow.lex")
     parser.add_argument("--experiment-id", default="23")
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--stages", default="all")
+    add_summaries_argument(parser)
     args = parser.parse_args()
 
     cases = json.load(open(args.cases))
@@ -347,12 +374,13 @@ def main():
         mlflow.log_param("region", args.region)
 
         start = time.time()
-        baseline_results = summaries = None
+        baseline_results = None
+        summaries = load_summaries_for(args, stages, mlflow)
 
         if "baseline" in stages:
             baseline_results = run_baseline(client, args.model, cases, args.samples)
         if "rq1" in stages and baseline_results:
-            _, summaries = run_summarization(client, args.model, cases, args.samples, baseline_results)
+            run_summarization(client, args.model, cases, args.samples, baseline_results, summaries)
         if "rq2" in stages and baseline_results and summaries:
             run_framing(client, args.model, cases, args.samples, summaries, baseline_results)
         if "rq3" in stages and baseline_results:

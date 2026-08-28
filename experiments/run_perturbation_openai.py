@@ -22,15 +22,18 @@ Usage:
     --samples 5
 """
 
-import argparse, json, os, time
-from collections import Counter
+import argparse, json, os, random, time
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from openai import OpenAI
 import mlflow
 
-from scoring import (MAX_CASE_CHARS, majority_vote, mean_rating,
-                     parse_rating, unparsed)
+from checkpoint import Checkpoint
+from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
+                     mean_rating, parse_rating, unparsed)
+from stats import flip_direction
+from summaries import add_argument as add_summaries_argument, is_usable, load_summaries_for
 
 # ── Prompts (shared with bedrock runner) ──────────────────────────────────
 
@@ -75,209 +78,351 @@ range: intermediate values are expected whenever the case is close.
 
 Provide ONLY the number as your response."""
 
-SUMMARY_TEMPLATE = """Summarize the following legal case to approximately 500 words, focusing on the key facts relevant to the alleged violation(s).
+# Summaries are built once by scripts/build_summaries.py with a fixed summariser and
+# passed in via --summaries. This runner does not summarise: doing it here meant the
+# judge model graded its own writing, and meant paying for the same judgments again
+# for every model in the roster.
 
-Case Name: {case_name}
-Full Text:
-{full_text}
-
-Summary (approximately 500 words):"""
-
-RECONSIDERATION_PROMPT = "Are you sure? Stick with your answer or provide a new number (1-5). ONLY provide the number."
+# The challenge has to be posed on the same scale as the question. This asked for a
+# number 1-5 while the opening prompt asked for a percentage, so a model that did not
+# change its mind still had to change its answer, and RQ3 measured the rescaling.
+RECONSIDERATION_PROMPT = (
+    "Are you sure? Stick with your answer or provide a new percentage from 0 to 100. "
+    "ONLY provide the number."
+)
 
 
 # ── OpenAI-compatible Client ─────────────────────────────────────────────
 
-def call_openai(client, model, system, user, temperature=1.0, max_tokens=500):
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        return f"ERROR: {e}"
+ATTEMPTS = 4
+
+# Sized from measurement, not from the length of the expected answer: the prompt
+# asks for a bare number, but a reasoning model spends thousands of tokens before
+# emitting it. deepseek-v4-pro returns empty 8/8 at 500 and 5/20 at 4,000.
+MAX_COMPLETION_TOKENS = 8000
+
+# Circuit breaker: a sustained run of rows with failed samples means the problem is
+# the environment, not the odd bad response, and every further row is thin data that
+# resume will skip. Wide enough not to trip on a rate-limit burst.
+BREAKER_WINDOW = 40
+BREAKER_RATE = 0.5
+
+artifact_failures = Counter()
 
 
-def call_openai_multiturn(client, model, system, messages, temperature=1.0, max_tokens=500):
+def _complete(client, model, api_messages, temperature, max_tokens):
+    """One completion, retried, because at 20 workers rate limits are normal traffic.
+
+    Without a retry a 429 becomes an "ERROR:" string, the parser returns None, and
+    the arm silently loses the row -- the failure looks like an unparsed answer
+    rather than like the throttling it is.
+
+    An empty body is retried at a *raised* ceiling, never the same one. Reasoning
+    models spend their budget before emitting content, so repeating the call at the
+    original limit buys the same empty response again: four such retries cost $8 in
+    three minutes once already.
+
+    The ceiling starts high rather than escalating from a tight one. Measured on
+    deepseek-v4-pro, which needs ~3,100 completion tokens to answer "give me a
+    number": at max_tokens=500 it returns empty 8 times out of 8, at 4,000 it still
+    fails a quarter of the time, at 8,000 it never does. A ceiling is a cap and not
+    a reservation -- gemini-3.5-flash averages 850 tokens whether the cap is 4,000 or
+    16,000 -- so starting low buys nothing and costs the full budget of every empty
+    response it causes.
+    """
+    limit = max_tokens
+    for attempt in range(ATTEMPTS):
+        try:
+            resp = client.chat.completions.create(
+                model=model, messages=api_messages,
+                temperature=temperature, max_tokens=limit,
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            if content:
+                return content
+            limit *= 2
+        except Exception as e:
+            if attempt == ATTEMPTS - 1:
+                return f"ERROR: {e}"
+            time.sleep(min(2 ** attempt, 30) + random.uniform(0, 1))
+    return f"ERROR: empty content after {ATTEMPTS} attempts, last limit {limit}"
+
+
+def call_openai(client, model, system, user, temperature=1.0, max_tokens=MAX_COMPLETION_TOKENS):
+    return _complete(client, model, [{"role": "system", "content": system},
+                                     {"role": "user", "content": user}],
+                     temperature, max_tokens)
+
+
+def call_openai_multiturn(client, model, system, messages, temperature=1.0, max_tokens=MAX_COMPLETION_TOKENS):
+    api_messages = [{"role": "system", "content": system}]
+    api_messages += [{"role": m["role"], "content": m["content"]} for m in messages]
+    return _complete(client, model, api_messages, temperature, max_tokens)
+
+
+def log_artifact(obj, name):
+    """Copy results into MLflow, but never let that failure kill a finished arm.
+
+    The artifact store is a convenience copy: the authoritative record is the
+    checkpoint file and the results JSON on disk. On prod the EC2 role has no
+    s3:PutObject on the artifacts bucket, and an unguarded log_dict turned a
+    completed baseline arm into a traceback -- throwing away the reporting for work
+    that had already been paid for and written.
+    """
     try:
-        api_messages = [{"role": "system", "content": system}]
-        for m in messages:
-            api_messages.append({"role": m["role"], "content": m["content"]})
-        resp = client.chat.completions.create(
-            model=model,
-            messages=api_messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return resp.choices[0].message.content.strip()
+        mlflow.log_dict(obj, name)
     except Exception as e:
-        return f"ERROR: {e}"
+        artifact_failures[name.split("_")[0]] += 1
+        print(f"\n  artifact {name} not stored ({type(e).__name__}); "
+              f"results are on disk regardless")
+
+
+def _fan_out(units, work, ckpt, label, workers):
+    """Run independent units concurrently, recording results as they land.
+
+    Workers only call the API. Recording happens on this thread, so the checkpoint
+    file keeps a single writer and the progress line stays readable. Units already
+    in the checkpoint are never resubmitted, which is what makes a resumed run cheap
+    rather than merely correct.
+    """
+    pending = [u for u in units if not ckpt.done(u["key"])]
+    if ckpt.resumed:
+        print(f"  {label}: resuming, {ckpt.resumed} already recorded")
+    if not pending:
+        print(f"  {label}: nothing left to do")
+        return ckpt.rows()
+    done = 0
+    recent = deque(maxlen=BREAKER_WINDOW)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(work, u): u for u in pending}
+        for fut in as_completed(futures):
+            unit = futures[fut]
+            row = fut.result()
+            if row is not None:
+                ckpt.record(unit["key"], row)
+                ratings = row.get("ratings") or []
+                recent.append(sum(1 for r in ratings if r is None) / len(ratings)
+                              if ratings else 1.0)
+            done += 1
+            print(f"\r  {label}: {done}/{len(pending)}", end="", flush=True)
+            if len(recent) == BREAKER_WINDOW and sum(recent) / len(recent) > BREAKER_RATE:
+                # Stop rather than keep writing rows built on one sample instead of
+                # three. A row is checkpointed when its unit completes, so resume
+                # skips it forever; grinding on through an outage quietly converts
+                # the rest of the corpus into thin data. This is what an uplink
+                # failure on 27 Aug did for twenty minutes before it was noticed.
+                for f in futures:
+                    f.cancel()
+                print(f"\n  {label}: STOPPING -- {sum(recent)/len(recent):.0%} of the "
+                      f"last {BREAKER_WINDOW} rows had failed samples. Check the "
+                      f"network, then prune with scripts/prune_degraded.py and resume.")
+                break
+    print()
+    return ckpt.rows()
+
+
+def _score(client, model, prompt, n_samples):
+    return [parse_rating(call_openai(client, model, SYSTEM_PROMPT, prompt))
+            for _ in range(n_samples)]
 
 
 # ── Experiments ──────────────────────────────────────────────────────────
 
-def run_baseline(client, model, cases, n_samples):
-    results = []
+def case_text(case):
+    return case.get("full_case_text_no_verdict", case.get("verdict_free_text", ""))[:MAX_CASE_CHARS]
+
+
+def article_title(case):
+    return ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
+
+
+def run_baseline(client, model, cases, n_samples, ckpt=None, workers=1):
+    ckpt = ckpt or Checkpoint(None, enabled=False)
     with mlflow.start_run(run_name="baseline", nested=True):
         mlflow.log_param("stage", "baseline")
         mlflow.log_param("n_cases", len(cases))
-        for i, case in enumerate(cases):
-            text = case.get("full_case_text_no_verdict", case.get("verdict_free_text", ""))[:MAX_CASE_CHARS]
-            article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
-            prompt = PREDICTIVE_TEMPLATE.format(case_text=text, article=case["article"], article_title=article_title)
-            ratings = []
-            for _ in range(n_samples):
-                resp = call_openai(client, model, SYSTEM_PROMPT, prompt)
-                ratings.append(parse_rating(resp))
+        mlflow.log_param("workers", workers)
+
+        units = [{"key": ckpt.key("baseline", c["item_id"], c["article"]), "case": c}
+                 for c in cases]
+
+        def work(unit):
+            case = unit["case"]
+            prompt = PREDICTIVE_TEMPLATE.format(case_text=case_text(case),
+                                                article=case["article"],
+                                                article_title=article_title(case))
+            ratings = _score(client, model, prompt, n_samples)
             pred, abstained = majority_vote(ratings)
-            results.append({
-                "case_name": case["case_name"], "article": case["article"],
+            return {
+                "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
                 "violation_label": case["violation_label"], "prediction": pred,
                 "accurate": pred == case["violation_label"], "abstained": abstained,
                 "ratings": ratings, "avg_rating": mean_rating(ratings),
-            })
-            acc = sum(r["accurate"] for r in results) / len(results)
-            print(f"\r  Baseline: {i+1}/{len(cases)} | acc={acc:.2f}", end="", flush=True)
+                "n_unparsed": count_unparsed(ratings),
+            }
+
+        results = _fan_out(units, work, ckpt, "Baseline", workers)
         accuracy = sum(r["accurate"] for r in results) / len(results)
         abstention = sum(r["abstained"] for r in results) / len(results)
         mlflow.log_metric("accuracy", accuracy)
         mlflow.log_metric("abstention_rate", abstention)
-        mlflow.log_dict(results, "baseline_results.json")
+        log_artifact(results, "baseline_results.json")
         print(f"\n  Baseline: acc={accuracy:.3f}, abstention={abstention:.3f}")
     return results
 
 
-def run_summarization(client, model, cases, n_samples, baseline_results):
+def run_summarization(client, model, cases, n_samples, baseline_results, summaries, ckpt=None, workers=1):
+    ckpt = ckpt or Checkpoint(None, enabled=False)
+    n_versions = max((len(v) for v in summaries.values()), default=0)
     with mlflow.start_run(run_name="rq1_summarization", nested=True):
         mlflow.log_param("stage", "rq1_summarization")
-        summaries = {}
-        for i, case in enumerate(cases):
-            text = case.get("full_case_text_no_verdict", case.get("verdict_free_text", ""))[:MAX_CASE_CHARS]
-            key = case["item_id"] + "_" + case["article"]
-            summaries[key] = []
-            for v in range(3):
-                prompt = SUMMARY_TEMPLATE.format(case_name=case["case_name"], full_text=text)
-                s = call_openai(client, model, "", prompt, temperature=1.0, max_tokens=1000)
-                summaries[key].append(s)
-            print(f"\r  Summaries: {i+1}/{len(cases)}", end="", flush=True)
-        print()
-        mlflow.log_dict(summaries, "summaries.json")
-
-        summary_results = []
-        for i, case in enumerate(cases):
-            key = case["item_id"] + "_" + case["article"]
+        mlflow.log_param("n_summary_versions", n_versions)
+        mlflow.log_param("workers", workers)
+        skipped_no_summary = 0
+        units = []
+        for case in cases:
+            versions = summaries.get(case["item_id"]) or []
             baseline_pred = next((r["prediction"] for r in baseline_results
-                                  if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
-            for v in range(3):
-                article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
-                prompt = PREDICTIVE_TEMPLATE.format(case_text=summaries[key][v], article=case["article"], article_title=article_title)
-                ratings = []
-                for _ in range(n_samples):
-                    resp = call_openai(client, model, SYSTEM_PROMPT, prompt)
-                    ratings.append(parse_rating(resp))
-                pred, _ = majority_vote(ratings)
-                summary_results.append({
-                    "case_name": case["case_name"], "article": case["article"],
-                    "violation_label": case["violation_label"], "summary_version": v,
-                    "prediction": pred, "accurate": pred == case["violation_label"],
-                    "aligned": pred == baseline_pred, "ratings": ratings,
-                })
-            print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
+                                  if r["item_id"] == case["item_id"] and r["article"] == case["article"]), None)
+            for v in range(n_versions):
+                text = versions[v] if v < len(versions) else None
+                if not is_usable(text):
+                    skipped_no_summary += 1
+                    continue
+                units.append({"key": ckpt.key("rq1", case["item_id"], case["article"], v),
+                              "case": case, "version": v, "text": text, "baseline": baseline_pred})
+
+        def work(unit):
+            case, v = unit["case"], unit["version"]
+            prompt = PREDICTIVE_TEMPLATE.format(case_text=unit["text"], article=case["article"],
+                                                article_title=article_title(case))
+            ratings = _score(client, model, prompt, n_samples)
+            pred, abstained = majority_vote(ratings)
+            return {
+                "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
+                "violation_label": case["violation_label"], "summary_version": v,
+                "prediction": pred, "accurate": pred == case["violation_label"],
+                "aligned": pred == unit["baseline"], "abstained": abstained,
+                "avg_rating": mean_rating(ratings),
+                "flip_direction": flip_direction(unit["baseline"], pred),
+                "ratings": ratings, "n_unparsed": count_unparsed(ratings),
+            }
+
+        summary_results = _fan_out(units, work, ckpt, "RQ1", workers)
+        if skipped_no_summary:
+            mlflow.log_metric("rq1_skipped_no_summary", skipped_no_summary)
+            print(f"\n  RQ1: skipped {skipped_no_summary} case-versions with no usable summary")
+        if not summary_results:
+            print("\n  RQ1: nothing scored")
+            return summary_results
         accuracy = sum(r["accurate"] for r in summary_results) / len(summary_results)
         alignment = sum(r["aligned"] for r in summary_results) / len(summary_results)
         mlflow.log_metric("accuracy", accuracy)
         mlflow.log_metric("alignment_rate", alignment)
-        mlflow.log_dict(summary_results, "rq1_results.json")
+        log_artifact(summary_results, "rq1_results.json")
         print(f"\n  RQ1: acc={accuracy:.3f}, alignment={alignment:.3f}")
-    return summary_results, summaries
+    return summary_results
 
 
-def run_framing(client, model, cases, n_samples, summaries, baseline_results):
+def run_framing(client, model, cases, n_samples, summaries, baseline_results, ckpt=None, workers=1):
+    ckpt = ckpt or Checkpoint(None, enabled=False)
     with mlflow.start_run(run_name="rq2_framing", nested=True):
         mlflow.log_param("stage", "rq2_framing")
         framings = {"predictive": PREDICTIVE_TEMPLATE, "normative": NORMATIVE_TEMPLATE, "factual": FACTUAL_TEMPLATE}
-        results = []
+        mlflow.log_param("workers", workers)
         skipped_no_summary = 0
-        for i, case in enumerate(cases):
-            key = case["item_id"] + "_" + case["article"]
-            text = summaries.get(key, [""])[0]
-            if not text:
+        units = []
+        for case in cases:
+            text = (summaries.get(case["item_id"]) or [None])[0]
+            if not is_usable(text):
                 # Falling back to raw case text here silently mixed conditions:
                 # a failed summarisation was scored as if it were a summary.
                 skipped_no_summary += 1
                 continue
             baseline_pred = next((r["prediction"] for r in baseline_results
-                                  if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
-            for fname, template in framings.items():
-                article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
-                prompt = template.format(case_text=text, article=case["article"], article_title=article_title)
-                ratings = []
-                for _ in range(n_samples):
-                    resp = call_openai(client, model, SYSTEM_PROMPT, prompt)
-                    ratings.append(parse_rating(resp))
-                pred, _ = majority_vote(ratings)
-                results.append({
-                    "case_name": case["case_name"], "article": case["article"],
-                    "violation_label": case["violation_label"], "framing": fname,
-                    "prediction": pred, "accurate": pred == case["violation_label"],
-                    "aligned_with_baseline": pred == baseline_pred, "ratings": ratings,
-                })
-            print(f"\r  Framing: {i+1}/{len(cases)}", end="", flush=True)
+                                  if r["item_id"] == case["item_id"] and r["article"] == case["article"]), None)
+            for fname in framings:
+                units.append({"key": ckpt.key("rq2", case["item_id"], case["article"], fname),
+                              "case": case, "framing": fname, "text": text, "baseline": baseline_pred})
+
+        def work(unit):
+            case, fname = unit["case"], unit["framing"]
+            prompt = framings[fname].format(case_text=unit["text"], article=case["article"],
+                                            article_title=article_title(case))
+            ratings = _score(client, model, prompt, n_samples)
+            pred, abstained = majority_vote(ratings)
+            return {
+                "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
+                "violation_label": case["violation_label"], "framing": fname,
+                "prediction": pred, "accurate": pred == case["violation_label"],
+                "aligned_with_baseline": pred == unit["baseline"], "abstained": abstained,
+                "avg_rating": mean_rating(ratings),
+                "flip_direction": flip_direction(unit["baseline"], pred),
+                "ratings": ratings, "n_unparsed": count_unparsed(ratings),
+            }
+
+        results = _fan_out(units, work, ckpt, "RQ2", workers)
         for fname in framings:
             fr = [r for r in results if r["framing"] == fname]
+            if not fr:
+                continue
             mlflow.log_metric(f"accuracy_{fname}", sum(r["accurate"] for r in fr) / len(fr))
             mlflow.log_metric(f"alignment_{fname}", sum(r["aligned_with_baseline"] for r in fr) / len(fr))
         if skipped_no_summary:
             mlflow.log_metric("rq2_skipped_no_summary", skipped_no_summary)
-            print(f"\n  RQ2: skipped {skipped_no_summary} cases with no summary")
-        mlflow.log_dict(results, "rq2_results.json")
+            print(f"\n  RQ2: skipped {skipped_no_summary} cases with no usable summary")
+        log_artifact(results, "rq2_results.json")
         print(f"\n  RQ2 done")
     return results
 
 
-def run_reconsideration(client, model, cases, n_samples, baseline_results):
+def run_reconsideration(client, model, cases, n_samples, baseline_results, ckpt=None, workers=1):
+    ckpt = ckpt or Checkpoint(None, enabled=False)
     with mlflow.start_run(run_name="rq3_reconsideration", nested=True):
         mlflow.log_param("stage", "rq3_reconsideration")
-        results = []
-        for i, case in enumerate(cases):
-            text = case.get("full_case_text_no_verdict", case.get("verdict_free_text", ""))[:MAX_CASE_CHARS]
-            article_title = ARTICLE_TITLES.get(case["article"], f"Article {case['article']}")
-            prompt = PREDICTIVE_TEMPLATE.format(case_text=text, article=case["article"], article_title=article_title)
+        mlflow.log_param("workers", workers)
+        units = [{"key": ckpt.key("rq3", c["item_id"], c["article"]), "case": c} for c in cases]
+
+        def work(unit):
+            case = unit["case"]
+            prompt = PREDICTIVE_TEMPLATE.format(case_text=case_text(case), article=case["article"],
+                                                article_title=article_title(case))
             orig_ratings, chal_ratings = [], []
-            for s in range(n_samples):
+            for _ in range(n_samples):
+                # The challenge has to follow this sample's own answer, so the two
+                # calls stay sequential within a unit; units run concurrently.
                 resp1 = call_openai(client, model, SYSTEM_PROMPT, prompt)
-                r1 = parse_rating(resp1)
-                orig_ratings.append(r1)
+                orig_ratings.append(parse_rating(resp1))
                 messages = [
                     {"role": "user", "content": prompt},
                     {"role": "assistant", "content": resp1},
                     {"role": "user", "content": RECONSIDERATION_PROMPT},
                 ]
-                resp2 = call_openai_multiturn(client, model, SYSTEM_PROMPT, messages)
-                r2 = parse_rating(resp2)
-                chal_ratings.append(r2)
-            orig_pred, _ = majority_vote(orig_ratings)
-            chal_pred, _ = majority_vote(chal_ratings)
+                chal_ratings.append(parse_rating(
+                    call_openai_multiturn(client, model, SYSTEM_PROMPT, messages)))
+            orig_pred, orig_abstained = majority_vote(orig_ratings)
+            chal_pred, chal_abstained = majority_vote(chal_ratings)
             baseline_pred = next((r["prediction"] for r in baseline_results
-                                  if r["case_name"] == case["case_name"] and r["article"] == case["article"]), None)
+                                  if r["item_id"] == case["item_id"] and r["article"] == case["article"]), None)
             changed_samples = sum(1 for o, c in zip(orig_ratings, chal_ratings) if o != c)
-            results.append({
-                "case_name": case["case_name"], "article": case["article"],
-                "violation_label": case["violation_label"],
+            return {
+                "item_id": case["item_id"], "case_name": case["case_name"], "article": case["article"],
+                "violation_label": case["violation_label"], "baseline_prediction": baseline_pred,
                 "original_prediction": orig_pred, "challenged_prediction": chal_pred,
                 "changed": orig_pred != chal_pred, "change_pct": changed_samples / n_samples,
+                "original_abstained": orig_abstained, "challenged_abstained": chal_abstained,
+                "avg_rating": mean_rating(orig_ratings),
+                "avg_rating_challenged": mean_rating(chal_ratings),
+                "flip_direction": flip_direction(orig_pred, chal_pred),
                 "original_ratings": orig_ratings, "challenged_ratings": chal_ratings,
-            })
-            print(f"\r  Reconsideration: {i+1}/{len(cases)}", end="", flush=True)
+                "ratings": orig_ratings + chal_ratings,
+                "n_unparsed": count_unparsed(orig_ratings + chal_ratings),
+            }
+
+        results = _fan_out(units, work, ckpt, "RQ3", workers)
         changed = sum(r["changed"] for r in results) / len(results)
         mlflow.log_metric("changed_rate", changed)
-        mlflow.log_dict(results, "rq3_results.json")
+        log_artifact(results, "rq3_results.json")
         print(f"\n  RQ3: changed_rate={changed:.3f}")
     return results
 
@@ -292,7 +437,13 @@ def main():
     parser.add_argument("--api-key-env", default="DEEPSEEK_API_KEY", help="Env var name for API key")
     parser.add_argument("--samples", type=int, default=5, help="Samples per case (default 5)")
     parser.add_argument("--rq", choices=["baseline", "rq1", "rq2", "rq3", "all"], default="all")
+    add_summaries_argument(parser)
     parser.add_argument("--output-dir", default="data/experiments/full_scale")
+    parser.add_argument("--workers", type=int, default=20,
+                        help="concurrent API calls (20 is the validated ceiling for "
+                             "one OpenRouter key; sequential is ~136h per model)")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="ignore any checkpoint and score every case again")
     args = parser.parse_args()
 
     api_key = os.environ.get(args.api_key_env, "")
@@ -311,10 +462,11 @@ def main():
     print(f"Model: {args.model}")
     print(f"Cases: {len(cases)}")
     print(f"Samples: {args.samples}")
+    print(f"Workers: {args.workers}")
     print(f"API: {args.base_url}")
     print()
 
-    mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://10.88.0.4:5000"))
+    mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "https://mlflow.lex"))
     mlflow.set_experiment("full_scale_perturbation")
 
     model_key = args.model.replace("/", "_").replace(".", "_")
@@ -329,10 +481,13 @@ def main():
         rqs = ["baseline", "rq1", "rq2", "rq3"] if args.rq == "all" else [args.rq]
 
         baseline_results = None
-        summaries = None
+        summaries = load_summaries_for(args, rqs, mlflow)
 
         if "baseline" in rqs:
-            baseline_results = run_baseline(client, args.model, cases, args.samples)
+            ckpt = Checkpoint(f"{args.output_dir}/{model_key}/baseline.jsonl",
+                              enabled=not args.no_resume)
+            baseline_results = run_baseline(client, args.model, cases, args.samples, ckpt, args.workers)
+            ckpt.close()
             with open(f"{args.output_dir}/{model_key}/baseline_results.json", "w") as f:
                 json.dump(baseline_results, f, indent=2)
 
@@ -345,30 +500,20 @@ def main():
                 print("ERROR: Need baseline results first")
                 return
 
-        if "rq1" in rqs:
-            rq1_results, summaries = run_summarization(client, args.model, cases, args.samples, baseline_results)
-            with open(f"{args.output_dir}/{model_key}/rq1_results.json", "w") as f:
-                json.dump(rq1_results, f, indent=2)
-            with open(f"{args.output_dir}/{model_key}/summaries.json", "w") as f:
-                json.dump(summaries, f, indent=2)
-
-        if summaries is None:
-            sp = f"{args.output_dir}/{model_key}/summaries.json"
-            if os.path.exists(sp):
-                with open(sp) as f:
-                    summaries = json.load(f)
+        for stage, fn in (("rq1", run_summarization), ("rq2", run_framing), ("rq3", run_reconsideration)):
+            if stage not in rqs:
+                continue
+            ckpt = Checkpoint(f"{args.output_dir}/{model_key}/{stage}.jsonl",
+                              enabled=not args.no_resume)
+            if stage == "rq1":
+                rows = fn(client, args.model, cases, args.samples, baseline_results, summaries, ckpt, args.workers)
+            elif stage == "rq2":
+                rows = fn(client, args.model, cases, args.samples, summaries, baseline_results, ckpt, args.workers)
             else:
-                summaries = {}
-
-        if "rq2" in rqs:
-            rq2_results = run_framing(client, args.model, cases, args.samples, summaries, baseline_results)
-            with open(f"{args.output_dir}/{model_key}/rq2_results.json", "w") as f:
-                json.dump(rq2_results, f, indent=2)
-
-        if "rq3" in rqs:
-            rq3_results = run_reconsideration(client, args.model, cases, args.samples, baseline_results)
-            with open(f"{args.output_dir}/{model_key}/rq3_results.json", "w") as f:
-                json.dump(rq3_results, f, indent=2)
+                rows = fn(client, args.model, cases, args.samples, baseline_results, ckpt, args.workers)
+            ckpt.close()
+            with open(f"{args.output_dir}/{model_key}/{stage}_results.json", "w") as f:
+                json.dump(rows, f, indent=2)
 
     if unparsed:
         total = sum(unparsed.values())

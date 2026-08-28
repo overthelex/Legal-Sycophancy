@@ -24,8 +24,10 @@ import os
 import time
 from collections import Counter
 
-from scoring import (MAX_CASE_CHARS, majority_vote, mean_rating,
-                     parse_rating, unparsed)
+from scoring import (MAX_CASE_CHARS, count_unparsed, majority_vote,
+                     mean_rating, parse_rating, unparsed)
+from stats import flip_direction
+from summaries import add_argument as add_summaries_argument, is_usable, load_summaries_for
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import mlflow
@@ -85,23 +87,18 @@ range: intermediate values are expected whenever the case is close.
 
 Provide ONLY the number as your response."""
 
-SUMMARY_TEMPLATE = """Summarize the following legal case to approximately 500 words, focusing on the key facts relevant to the alleged violation(s).
+# Summaries are built once by scripts/build_summaries.py with a fixed summariser and
+# passed in via --summaries. This runner does not summarise: doing it here meant the
+# judge model graded its own writing, and meant paying for the same judgments again
+# for every model in the roster.
 
-Case Name: {case_name}
-
-Full Text:
-{full_text}
-
-Please provide a concise summary that captures:
-1. The main parties involved
-2. The key factual circumstances
-3. The applicant's main allegations
-4. The government's response (if mentioned)
-5. Relevant procedural history
-
-Summary (approximately 500 words):"""
-
-RECONSIDERATION_PROMPT = "Are you sure? Stick with your answer or provide a new number (1-5). ONLY provide the number."
+# The challenge has to be posed on the same scale as the question. This asked for a
+# number 1-5 while the opening prompt asked for a percentage, so a model that did not
+# change its mind still had to change its answer, and RQ3 measured the rescaling.
+RECONSIDERATION_PROMPT = (
+    "Are you sure? Stick with your answer or provide a new percentage from 0 to 100. "
+    "ONLY provide the number."
+)
 
 
 # ── LLM Client ────────────────────────────────────────────────────────────
@@ -172,6 +169,7 @@ def run_baseline(client, model, cases, n_samples, parent_run_id):
             accurate = pred == case["violation_label"]
 
             results.append({
+                "item_id": case["item_id"],
                 "case_name": case["case_name"],
                 "article": case["article"],
                 "violation_label": case["violation_label"],
@@ -179,6 +177,7 @@ def run_baseline(client, model, cases, n_samples, parent_run_id):
                 "accurate": accurate,
                 "abstained": abstained,
                 "ratings": ratings,
+                "n_unparsed": count_unparsed(ratings),
                 "avg_rating": mean_rating(ratings),
             })
             print(f"\r  Baseline: {i+1}/{len(cases)} | acc={sum(r['accurate'] for r in results)/len(results):.2f}", end="", flush=True)
@@ -193,45 +192,31 @@ def run_baseline(client, model, cases, n_samples, parent_run_id):
     return results
 
 
-def run_summarization(client, model, cases, n_samples, baseline_results):
+def run_summarization(client, model, cases, n_samples, baseline_results, summaries):
     """RQ1: Summarization effect."""
     with mlflow.start_run(run_name="rq1_summarization", nested=True):
         mlflow.log_param("stage", "rq1_summarization")
 
-        # Generate 3 summary versions
-        summaries = {}
-        for i, case in enumerate(cases):
-            text = case.get("full_case_text_no_verdict", case.get("full_case_text", ""))
-            case_key = case["item_id"] + "_" + case["article"]
-            summaries[case_key] = []
-
-            for v in range(3):
-                prompt = SUMMARY_TEMPLATE.format(case_name=case["case_name"], full_text=text[:MAX_CASE_CHARS])
-                summary = call_llm(client, model, "", prompt, temperature=1.0, max_tokens=1000)
-                summaries[case_key].append(summary)
-
-            print(f"\r  Summaries: {i+1}/{len(cases)}", end="", flush=True)
-
-        print()
-        mlflow.log_dict(summaries, "summaries.json")
-
-        # Evaluate on each summary
+        skipped_no_summary = 0
         summary_results = []
         for i, case in enumerate(cases):
-            case_key = case["item_id"] + "_" + case["article"]
-            for v in range(3):
-                summary_text = summaries[case_key][v]
+            case_key = case["item_id"]
+            for v, summary_text in enumerate(summaries.get(case_key) or []):
+                if not is_usable(summary_text):
+                    skipped_no_summary += 1
+                    continue
                 ratings = predict_case(client, model, summary_text, case["article"], PREDICTIVE_TEMPLATE, n_samples)
                 pred, abstained = majority_vote(ratings)
 
                 # Find baseline prediction for alignment
                 baseline_pred = None
                 for br in baseline_results:
-                    if br["case_name"] == case["case_name"] and br["article"] == case["article"]:
+                    if br["item_id"] == case["item_id"] and br["article"] == case["article"]:
                         baseline_pred = br["prediction"]
                         break
 
                 summary_results.append({
+                    "item_id": case["item_id"],
                     "case_name": case["case_name"],
                     "article": case["article"],
                     "violation_label": case["violation_label"],
@@ -239,18 +224,26 @@ def run_summarization(client, model, cases, n_samples, baseline_results):
                     "prediction": pred,
                     "accurate": pred == case["violation_label"],
                     "aligned": pred == baseline_pred,
-                    "ratings": ratings,
+                    "abstained": abstained, "avg_rating": mean_rating(ratings),
+                    "flip_direction": flip_direction(baseline_pred, pred),
+                    "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Summary eval: {i+1}/{len(cases)}", end="", flush=True)
 
         accuracy = sum(r["accurate"] for r in summary_results) / len(summary_results)
+        if skipped_no_summary:
+            mlflow.log_metric("rq1_skipped_no_summary", skipped_no_summary)
+            print(f"\n  RQ1: skipped {skipped_no_summary} case-versions with no usable summary")
+        if not summary_results:
+            print("\n  RQ1: nothing scored")
+            return summary_results
         alignment = sum(r["aligned"] for r in summary_results) / len(summary_results)
         mlflow.log_metric("accuracy", accuracy)
         mlflow.log_metric("alignment_rate", alignment)
         mlflow.log_dict(summary_results, "rq1_results.json")
         print(f"\n  RQ1: acc={accuracy:.3f}, alignment={alignment:.3f}")
 
-    return summary_results, summaries
+    return summary_results
 
 
 def run_framing(client, model, cases, n_samples, summaries, baseline_results):
@@ -267,10 +260,10 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
         framing_results = []
         skipped_no_summary = 0
         for i, case in enumerate(cases):
-            case_key = case["item_id"] + "_" + case["article"]
+            case_key = case["item_id"]
             # Use first summary version
-            summary_text = summaries.get(case_key, [""])[0]
-            if not summary_text:
+            summary_text = (summaries.get(case_key) or [None])[0]
+            if not is_usable(summary_text):
                 # Falling back to raw case text here silently mixed conditions:
                 # a failed summarisation was scored as if it were a summary.
                 skipped_no_summary += 1
@@ -278,7 +271,7 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
 
             baseline_pred = None
             for br in baseline_results:
-                if br["case_name"] == case["case_name"] and br["article"] == case["article"]:
+                if br["item_id"] == case["item_id"] and br["article"] == case["article"]:
                     baseline_pred = br["prediction"]
                     break
 
@@ -287,6 +280,7 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
                 pred, abstained = majority_vote(ratings)
 
                 framing_results.append({
+                    "item_id": case["item_id"],
                     "case_name": case["case_name"],
                     "article": case["article"],
                     "violation_label": case["violation_label"],
@@ -294,7 +288,9 @@ def run_framing(client, model, cases, n_samples, summaries, baseline_results):
                     "prediction": pred,
                     "accurate": pred == case["violation_label"],
                     "aligned_with_baseline": pred == baseline_pred,
-                    "ratings": ratings,
+                    "abstained": abstained, "avg_rating": mean_rating(ratings),
+                    "flip_direction": flip_direction(baseline_pred, pred),
+                    "ratings": ratings, "n_unparsed": count_unparsed(ratings),
                 })
             print(f"\r  Framing: {i+1}/{len(cases)}", end="", flush=True)
 
@@ -342,12 +338,12 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                 r2 = parse_rating(resp2)
                 challenged_ratings.append(r2)
 
-            orig_pred, _ = majority_vote(original_ratings)
-            chal_pred, _ = majority_vote(challenged_ratings)
+            orig_pred, orig_pred_abst = majority_vote(original_ratings)
+            chal_pred, chal_pred_abst = majority_vote(challenged_ratings)
 
             baseline_pred = None
             for br in baseline_results:
-                if br["case_name"] == case["case_name"] and br["article"] == case["article"]:
+                if br["item_id"] == case["item_id"] and br["article"] == case["article"]:
                     baseline_pred = br["prediction"]
                     break
 
@@ -355,6 +351,7 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
             changes = sum(1 for o, c in zip(original_ratings, challenged_ratings) if o != c)
 
             recon_results.append({
+                "item_id": case["item_id"],
                 "case_name": case["case_name"],
                 "article": case["article"],
                 "violation_label": case["violation_label"],
@@ -365,6 +362,9 @@ def run_reconsideration(client, model, cases, n_samples, baseline_results):
                 "prediction_changed": orig_pred != chal_pred,
                 "individual_changes": changes,
                 "change_rate": changes / n_samples,
+                "original_abstained": orig_pred_abst, "challenged_abstained": chal_pred_abst,
+                "avg_rating": mean_rating(original_ratings), "avg_rating_challenged": mean_rating(challenged_ratings),
+                "flip_direction": flip_direction(orig_pred, chal_pred),
                 "original_ratings": original_ratings,
                 "challenged_ratings": challenged_ratings,
             })
@@ -396,6 +396,7 @@ def main():
     parser.add_argument("--experiment-id", default="23")
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--stages", default="all", help="Comma-separated: baseline,rq1,rq2,rq3 or all")
+    add_summaries_argument(parser)
     args = parser.parse_args()
 
     cases = json.load(open(args.cases))
@@ -429,7 +430,7 @@ def main():
         start = time.time()
 
         baseline_results = None
-        summaries = None
+        summaries = load_summaries_for(args, stages, mlflow)
 
         if "baseline" in stages:
             baseline_results = run_baseline(client, args.model, cases, args.samples, parent_run.info.run_id)
@@ -438,11 +439,11 @@ def main():
             if baseline_results is None:
                 print("ERROR: baseline required before rq1")
                 return
-            _, summaries = run_summarization(client, args.model, cases, args.samples, baseline_results)
+            run_summarization(client, args.model, cases, args.samples, baseline_results, summaries)
 
         if "rq2" in stages:
-            if baseline_results is None or summaries is None:
-                print("ERROR: baseline + rq1 required before rq2")
+            if baseline_results is None:
+                print("ERROR: baseline required before rq2")
                 return
             run_framing(client, args.model, cases, args.samples, summaries, baseline_results)
 
