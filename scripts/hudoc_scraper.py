@@ -264,6 +264,37 @@ def parse_search_result(result: dict) -> dict:
     }
 
 
+def parse_article_code(part: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Extract the article from a conclusion fragment, returning
+    (article, article_full).
+
+    - article       : legacy collapsed code (bare number, kept for continuity)
+    - article_full  : protocol-aware code (e.g. "P1-1", "P4-2"), never lossy
+
+    "Article 1 of Protocol No. 1"  -> ("1",  "P1-1")   (property, NOT Convention Art 1)
+    "Article 2 of Protocol No. 4"  -> ("2",  "P4-2")
+    "P1-1"                         -> ("1",  "P1-1")
+    "Article 6"                    -> ("6",  "6")
+    """
+    # "Article <art> of Protocol No. <proto>"
+    m = re.search(r'Article\s+(\d+)\s+of\s+Protocol\s+(?:No\.?\s*)?(\d+)',
+                  part, re.IGNORECASE)
+    if m:
+        art, proto = m.group(1), m.group(2)
+        return art, f"P{proto}-{art}"
+    # Already-coded thesaurus form "P<proto>-<art>"
+    m = re.search(r'\bP(\d+)-(\d+)\b', part)
+    if m:
+        proto, art = m.group(1), m.group(2)
+        return art, f"P{proto}-{art}"
+    # Plain Convention article "Article <art>"
+    m = re.search(r'Article\s+(\d+)', part, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(1)
+    return None, None
+
+
 def parse_conclusion_to_pairs(conclusion: str, item_id: str, case_name: str,
                                 decision_date: str, respondent: str,
                                 full_text: str) -> list[dict]:
@@ -272,7 +303,8 @@ def parse_conclusion_to_pairs(conclusion: str, item_id: str, case_name: str,
     matching the format expected by verdict_leakage_removal.py.
 
     Each pair has the full CaseRecord-compatible fields:
-      item_id, case_name, article, violation_label, full_case_text, decision_date
+      item_id, case_name, article, article_full, violation_label,
+      full_case_text, decision_date
     """
     results = []
     if not conclusion:
@@ -281,6 +313,7 @@ def parse_conclusion_to_pairs(conclusion: str, item_id: str, case_name: str,
             "item_id": item_id,
             "case_name": case_name,
             "article": "",
+            "article_full": "",
             "violation_label": "unknown",
             "full_case_text": full_text,
             "decision_date": decision_date,
@@ -291,10 +324,9 @@ def parse_conclusion_to_pairs(conclusion: str, item_id: str, case_name: str,
     parts = re.split(r'[;]', conclusion)
     for part in parts:
         part = part.strip()
-        article_match = re.search(r'Article\s+([\dP][\d-]*)', part, re.IGNORECASE)
-        if not article_match:
+        article, article_full = parse_article_code(part)
+        if not article:
             continue
-        article = article_match.group(1)
 
         if re.search(r'no\s+violation', part, re.IGNORECASE):
             label = "no_violation"
@@ -307,6 +339,7 @@ def parse_conclusion_to_pairs(conclusion: str, item_id: str, case_name: str,
             "item_id": item_id,
             "case_name": case_name,
             "article": article,
+            "article_full": article_full,
             "violation_label": label,
             "full_case_text": full_text,
             "decision_date": decision_date,
@@ -319,6 +352,7 @@ def parse_conclusion_to_pairs(conclusion: str, item_id: str, case_name: str,
             "item_id": item_id,
             "case_name": case_name,
             "article": "",
+            "article_full": "",
             "violation_label": "unknown",
             "full_case_text": full_text,
             "decision_date": decision_date,

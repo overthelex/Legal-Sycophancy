@@ -23,8 +23,10 @@ Senior/last: Zhijing Jin (PI, University of Toronto).
 
 ## CRediT roles
 
-Per the split proposed by V. Ovcharov (email, 2026-06-19, resent 06-20)
-and acknowledged by T. Zhang (2026-06-20):
+The author list above is confirmed (Terry J. C. Zhang and Zhijing Jin,
+email, 2026-06-18; Terry publicly on Slack, "both co-first authors on
+this paper"). The CRediT role split below was proposed by V. Ovcharov
+(email, 2026-06-20) and is **pending co-author sign-off**:
 
 | CRediT role | Contributor(s) |
 |---|---|

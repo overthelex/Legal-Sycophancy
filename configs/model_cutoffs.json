@@ -1,0 +1,41 @@
+{
+  "_comment": "Training-data cutoff registry. Dates are YYYY-MM-DD taken from provider documentation. null = not yet verified -- build_cutoff_partitions.py refuses to partition for models with null cutoff. Always record the source.",
+  "models": {
+    "gpt-4o": {
+      "cutoff": "2023-10-01",
+      "source": "OpenAI model documentation (knowledge cutoff Oct 2023)"
+    },
+    "gpt-5.2": {
+      "cutoff": null,
+      "source": "PLACEHOLDER -- verify OpenAI docs"
+    },
+    "claude-sonnet-4-6": {
+      "cutoff": "2026-01-01",
+      "source": "Anthropic models overview (platform.claude.com), verified 2026-06-11: training data cutoff Jan 2026, reliable knowledge cutoff Aug 2025. Conservative choice: training data cutoff."
+    },
+    "claude-opus-4-8": {
+      "cutoff": null,
+      "source": "PLACEHOLDER -- verify Anthropic docs"
+    },
+    "deepseek-v4": {
+      "cutoff": null,
+      "source": "PLACEHOLDER -- verify DeepSeek docs"
+    },
+    "gemini-3.1-flash": {
+      "cutoff": null,
+      "source": "PLACEHOLDER -- verify Google docs"
+    },
+    "llama-3.3-70b": {
+      "cutoff": "2023-12-01",
+      "source": "Meta Llama 3.3 model card (knowledge cutoff Dec 2023)"
+    },
+    "qwen3-32b": {
+      "cutoff": null,
+      "source": "PLACEHOLDER -- verify Qwen docs"
+    },
+    "nova-pro": {
+      "cutoff": null,
+      "source": "PLACEHOLDER -- verify AWS docs"
+    }
+  }
+}

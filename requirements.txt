@@ -23,3 +23,5 @@ inspect-ai
 evaluate
 datasets
 rouge_score
+requests
+boto3

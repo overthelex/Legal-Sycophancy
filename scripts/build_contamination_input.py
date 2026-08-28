@@ -34,21 +34,20 @@ DEFAULT_OUTPUT = REPO_ROOT / "data" / "processed" / "echr_livehrb_static_2k.json
 
 # Fields we carry through verbatim if present on the source row.
 PASSTHROUGH_FIELDS = [
-    "item_id", "case_name", "respondent", "article", "violation_label",
-    "verdict_removal_method", "original_length", "verdict_free_length",
-    "retention_percentage", "decision_date", "application_number",
-    "importance", "ecli", "group",
+    "item_id", "case_name", "respondent", "article", "article_full",
+    "violation_label", "verdict_removal_method", "original_length",
+    "verdict_free_length", "retention_percentage", "decision_date",
+    "application_number", "importance", "ecli", "group",
 ]
 
 VALID_LABELS = {"violation", "no_violation"}
 
-# Article-key normalization. Vladimir's `article` field collapses protocol
-# prefixes: verified on static-2k, article='1' is Article 1 of Protocol No. 1
-# (property) in 95% of cases (194/205 mention Protocol No.1 / possessions;
-# only 4% mention Convention Article 1). Remap so the correct P1-1 legal test
-# and title apply. NOTE: other collapsed keys (e.g. '4' is mostly Protocol 4,
-# '2' has some P1-2) are NOT remapped here — pending Vladimir's full mapping —
-# so they safely use the generic fallback test rather than a wrong doctrine.
+# Article-key normalization. The legacy `article` field collapses protocol
+# prefixes (article='1' is Article 1 of Protocol 1 / property, not Convention
+# Art 1; '4' conflates Convention Art 4 with Protocol 4). Since v1.2 the datasets
+# carry a protocol-aware `article_full` (P1-1, P4-2, P7-4, P12-1, …) that resolves
+# all of these — we key on it when present. ARTICLE_KEY_REMAP is a fallback only
+# for older sources that predate article_full.
 ARTICLE_KEY_REMAP = {"1": "P1-1"}
 
 
@@ -100,8 +99,15 @@ def convert(rows, full_judgments_only: bool):
             continue
 
         rec = {k: r[k] for k in PASSTHROUGH_FIELDS if k in r}
-        # Normalize collapsed protocol article keys (see ARTICLE_KEY_REMAP).
-        if rec.get("article") in ARTICLE_KEY_REMAP:
+        # Prefer the protocol-aware article_full (v1.2+); it resolves every
+        # collapsed key, not just '1'. Fall back to the interim ARTICLE_KEY_REMAP
+        # only when article_full is absent (older sources).
+        af = str(r.get("article_full") or "").strip()
+        if af:
+            if af != str(rec.get("article", "")):
+                remapped += 1
+            rec["article"] = af
+        elif rec.get("article") in ARTICLE_KEY_REMAP:
             rec["article"] = ARTICLE_KEY_REMAP[rec["article"]]
             remapped += 1
         # The rename: contamination runners read full_case_text / *_no_verdict.
@@ -110,8 +116,8 @@ def convert(rows, full_judgments_only: bool):
         out.append(rec)
 
     if remapped:
-        print(f"  Remapped {remapped} article keys via ARTICLE_KEY_REMAP "
-              f"({ARTICLE_KEY_REMAP}).")
+        print(f"  Set {remapped} article keys to their protocol-aware code "
+              f"(article_full where present, else ARTICLE_KEY_REMAP).")
     if skipped_genre:
         print(f"  Dropped {skipped_genre} Information-Note (002-*) rows "
               f"[--full-judgments-only].")
